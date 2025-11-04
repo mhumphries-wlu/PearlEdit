@@ -27,6 +27,60 @@ logger = logging.getLogger(__name__)
 BaseTk = TkinterDnD.Tk if DND_AVAILABLE else tk.Tk
 
 
+class ToolTip:
+    """Tooltip widget for showing hints on hover."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        self.after_id = None
+        self.widget.bind('<Enter>', self.on_enter)
+        self.widget.bind('<Leave>', self.on_leave)
+    
+    def on_enter(self, event=None):
+        """Show tooltip when mouse enters widget."""
+        # Schedule tooltip to appear after a short delay
+        self.after_id = self.widget.after(500, self.show_tooltip)
+    
+    def on_leave(self, event=None):
+        """Hide tooltip when mouse leaves widget."""
+        # Cancel scheduled tooltip if mouse leaves before delay
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        self.hide_tooltip()
+    
+    def show_tooltip(self):
+        """Display the tooltip."""
+        if self.tip_window or not self.text:
+            return
+        
+        # Get widget position
+        x = self.widget.winfo_rootx() + 25
+        y = self.widget.winfo_rooty() + 20
+        
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        
+        label = tk.Label(
+            tw,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#ffffe0",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("Arial", 9)
+        )
+        label.pack(ipadx=5, ipady=2)
+    
+    def hide_tooltip(self):
+        """Hide the tooltip."""
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+
+
 class PearlEditApp(BaseTk):
     """Main application window."""
     
@@ -54,6 +108,9 @@ class PearlEditApp(BaseTk):
         
         # Icon cache to prevent garbage collection
         self._icon_cache = []
+        
+        # Store tooltip instances
+        self._tooltips = []
         
         # UI state
         self.current_scale = 1.0
@@ -203,32 +260,41 @@ class PearlEditApp(BaseTk):
         self.toolbar_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
         
         # Left side: New (Reset) button
-        self.reset_button = tk.Button(
+        def reset_wrapper():
+            self.update_status_display("Reset Tool: Clears all loaded images and resets application to initial state | All unsaved changes will be lost")
+            self.reset_program()
+        self.reset_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.reset_icon,
-            command=self.reset_program,
-            width=30,
-            height=30
+            self.reset_icon,
+            reset_wrapper,
+            "Reset Program\nClear all loaded images",
+            "Reset Tool: Clears all loaded images and resets application to initial state | All unsaved changes will be lost"
         )
         self.reset_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Left side: Open button
-        self.open_button = tk.Button(
+        def open_wrapper():
+            self.update_status_display("Import Tool: Select image files (.jpg, .jpeg) to import | Shortcut: Ctrl+I | Or drag and drop images onto canvas")
+            self.import_images()
+        self.open_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.open_icon,
-            command=self.import_images,
-            width=30,
-            height=30
+            self.open_icon,
+            open_wrapper,
+            "Import Images\nSelect image files to import\nShortcut: Ctrl+I",
+            "Import Tool: Select image files (.jpg, .jpeg) to import | Shortcut: Ctrl+I | Or drag and drop images onto canvas"
         )
         self.open_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Left side: Save button
-        self.save_button = tk.Button(
+        def save_wrapper():
+            self.update_status_display("Save Tool: Saves all processed images to current directory | Shortcut: Ctrl+S | Use Save As (Ctrl+Shift+S) to choose location")
+            self.save_images()
+        self.save_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.save_icon,
-            command=self.save_images,
-            width=30,
-            height=30
+            self.save_icon,
+            save_wrapper,
+            "Save Images\nSave processed images to current directory\nShortcut: Ctrl+S",
+            "Save Tool: Saves all processed images to current directory | Shortcut: Ctrl+S | Use Save As (Ctrl+Shift+S) to choose location"
         )
         self.save_button.pack(side=tk.LEFT, padx=5, pady=2)
         
@@ -240,67 +306,91 @@ class PearlEditApp(BaseTk):
         self.batch_process = tk.BooleanVar(value=self.settings.batch_process)
         initial_relief = tk.SUNKEN if self.settings.batch_process else tk.RAISED
         initial_icon = self.batch_process_on_icon if self.settings.batch_process else self.batch_process_off_icon
+        
+        def batch_process_wrapper():
+            # Will update status display in toggle_batch_process
+            self.toggle_batch_process()
+        
         self.batch_process_button = tk.Button(
             self.toolbar_frame,
             image=initial_icon,
-            command=self.toggle_batch_process,
+            command=batch_process_wrapper,
             width=30,
             height=30,
             relief=initial_relief
         )
         self.batch_process_button.pack(side=tk.LEFT, padx=5, pady=2)
+        self._tooltips.append(ToolTip(self.batch_process_button, "Batch Process\nToggle automatic advancement to next image\nafter operations"))
         # Update icon based on initial state (ensures consistency)
         self.update_batch_process_icon()
         
         # Apply to All Images toggle button
         self.apply_to_all = tk.BooleanVar(value=False)  # Default to current image only
+        
+        def apply_to_all_wrapper():
+            # Will update status display in toggle_apply_to_all
+            self.toggle_apply_to_all()
+        
         self.apply_to_all_button = tk.Button(
             self.toolbar_frame,
             image=self.current_page_icon,
-            command=self.toggle_apply_to_all,
+            command=apply_to_all_wrapper,
             width=30,
             height=30,
             relief=tk.RAISED
         )
         self.apply_to_all_button.pack(side=tk.LEFT, padx=5, pady=2)
+        self._tooltips.append(ToolTip(self.apply_to_all_button, "Apply to All\nToggle whether operations apply to\ncurrent image or all images"))
         
         # Left side: Split button with icon
-        self.split_button = tk.Button(
+        def split_wrapper():
+            self.update_status_display("Split Tool: To change between Horizontal and Vertical Cursor use Ctrl+H and Ctrl+V | To rotate cursor use [ and ] | To split image, click mouse")
+            self.switch_to_vertical()
+        self.split_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.split_icon,
-            command=lambda: self.switch_to_vertical(),
-            width=30,
-            height=30
+            self.split_icon,
+            split_wrapper,
+            "Split Image\nActivate vertical split cursor\nClick to split at cursor position\nShortcuts: Ctrl+V (vertical), Ctrl+H (horizontal)",
+            "Split Tool: To change between Horizontal and Vertical Cursor use Ctrl+H and Ctrl+V | To rotate cursor use [ and ] | To split image, click mouse"
         )
         self.split_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Left side: Crop button
-        self.crop_button = tk.Button(
+        def crop_wrapper():
+            self.update_status_display("Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape")
+            self.activate_crop_tool()
+        self.crop_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.crop_icon,
-            command=self.activate_crop_tool,
-            width=30,
-            height=30
+            self.crop_icon,
+            crop_wrapper,
+            "Crop Tool\nActivate crop mode\nDrag to select area\nEnter to apply, Escape to cancel\nShortcut: Ctrl+Shift+C",
+            "Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape"
         )
         self.crop_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Left side: Auto-crop button
-        self.autocrop_button = tk.Button(
+        def autocrop_wrapper():
+            self.update_status_display("Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort")
+            self.auto_crop_current()
+        self.autocrop_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.autocrop_icon,
-            command=self.auto_crop_current,
-            width=30,
-            height=30
+            self.autocrop_icon,
+            autocrop_wrapper,
+            "Auto Crop\nAutomatically crop image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+A",
+            "Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort"
         )
         self.autocrop_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Left side: Straighten button
-        self.straighten_button = tk.Button(
+        def straighten_wrapper():
+            self.update_status_display("Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line")
+            self.manual_straighten()
+        self.straighten_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.straighten_icon,
-            command=self.manual_straighten,
-            width=30,
-            height=30
+            self.straighten_icon,
+            straighten_wrapper,
+            "Straighten Image\nDraw a line to straighten image\nClick start point, then end point\nShortcut: Ctrl+L",
+            "Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line"
         )
         self.straighten_button.pack(side=tk.LEFT, padx=5, pady=2)
         
@@ -309,21 +399,27 @@ class PearlEditApp(BaseTk):
         
         # Right side: Navigation buttons (order: start, back, counter, forward, end)
         # Pack in reverse order since RIGHT packs from right to left
-        self.end_button = tk.Button(
+        def end_wrapper():
+            self.update_status_display("Navigation Tool: Jump to last image in collection | Use arrow buttons or Left/Right arrow keys to navigate")
+            self.navigate_images(2)
+        self.end_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.end_icon,
-            command=lambda: self.navigate_images(2),
-            width=30,
-            height=30
+            self.end_icon,
+            end_wrapper,
+            "Last Image\nGo to the last image",
+            "Navigation Tool: Jump to last image in collection | Use arrow buttons or Left/Right arrow keys to navigate"
         )
         self.end_button.pack(side=tk.RIGHT, padx=5)
         
-        self.forward_button = tk.Button(
+        def forward_wrapper():
+            self.update_status_display("Navigation Tool: Move to next image | Shortcut: Right Arrow | Use First/Last buttons to jump to ends")
+            self.navigate_images(1)
+        self.forward_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.forward_icon,
-            command=lambda: self.navigate_images(1),
-            width=30,
-            height=30
+            self.forward_icon,
+            forward_wrapper,
+            "Next Image\nNavigate to next image\nShortcut: Right Arrow",
+            "Navigation Tool: Move to next image | Shortcut: Right Arrow | Use First/Last buttons to jump to ends"
         )
         self.forward_button.pack(side=tk.RIGHT, padx=5)
         
@@ -336,21 +432,27 @@ class PearlEditApp(BaseTk):
         )
         self.counter_label.pack(side=tk.RIGHT, padx=10)
         
-        self.back_button = tk.Button(
+        def back_wrapper():
+            self.update_status_display("Navigation Tool: Move to previous image | Shortcut: Left Arrow | Counter shows current position (e.g., 3 / 10)")
+            self.navigate_images(-1)
+        self.back_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.back_icon,
-            command=lambda: self.navigate_images(-1),
-            width=30,
-            height=30
+            self.back_icon,
+            back_wrapper,
+            "Previous Image\nNavigate to previous image\nShortcut: Left Arrow",
+            "Navigation Tool: Move to previous image | Shortcut: Left Arrow | Counter shows current position (e.g., 3 / 10)"
         )
         self.back_button.pack(side=tk.RIGHT, padx=5)
         
-        self.start_button = tk.Button(
+        def start_wrapper():
+            self.update_status_display("Navigation Tool: Jump to first image in collection | Use arrow buttons or Left/Right arrow keys to navigate")
+            self.navigate_images(-2)
+        self.start_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.start_icon,
-            command=lambda: self.navigate_images(-2),
-            width=30,
-            height=30
+            self.start_icon,
+            start_wrapper,
+            "First Image\nGo to the first image",
+            "Navigation Tool: Jump to first image in collection | Use arrow buttons or Left/Right arrow keys to navigate"
         )
         self.start_button.pack(side=tk.RIGHT, padx=5)
         
@@ -359,21 +461,27 @@ class PearlEditApp(BaseTk):
         separator2.pack(side=tk.RIGHT, padx=10, pady=5, fill=tk.Y)
         
         # Rotate buttons on the right (pack in reverse order: right, then left)
-        self.rotate_right_button = tk.Button(
+        def rotate_right_wrapper():
+            self.update_status_display("Rotate Tool: Rotates image 90 degrees clockwise | Shortcut: Ctrl+] | Use Apply to All to rotate all images")
+            self.rotate_image(90)
+        self.rotate_right_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.rotate_right_icon,
-            command=lambda: self.rotate_image(90),
-            width=30,
-            height=30
+            self.rotate_right_icon,
+            rotate_right_wrapper,
+            "Rotate Clockwise\nRotate image 90° clockwise\nShortcut: Ctrl+]",
+            "Rotate Tool: Rotates image 90 degrees clockwise | Shortcut: Ctrl+] | Use Apply to All to rotate all images"
         )
         self.rotate_right_button.pack(side=tk.RIGHT, padx=5)
         
-        self.rotate_left_button = tk.Button(
+        def rotate_left_wrapper():
+            self.update_status_display("Rotate Tool: Rotates image 90 degrees counter-clockwise | Shortcut: Ctrl+[ | Use Apply to All to rotate all images")
+            self.rotate_image(-90)
+        self.rotate_left_button = self.create_button_with_hint(
             self.toolbar_frame,
-            image=self.rotate_left_icon,
-            command=lambda: self.rotate_image(-90),
-            width=30,
-            height=30
+            self.rotate_left_icon,
+            rotate_left_wrapper,
+            "Rotate Counter-Clockwise\nRotate image 90° counter-clockwise\nShortcut: Ctrl+[",
+            "Rotate Tool: Rotates image 90 degrees counter-clockwise | Shortcut: Ctrl+[ | Use Apply to All to rotate all images"
         )
         self.rotate_left_button.pack(side=tk.RIGHT, padx=5)
         
@@ -381,19 +489,80 @@ class PearlEditApp(BaseTk):
         main_frame = tk.Frame(self)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Canvas with minimum size
+        # Bottom frame for status display (pack first to ensure it's at bottom)
+        self.bottom_frame = tk.Frame(main_frame, bg='#e0e0e0', relief=tk.RAISED, borderwidth=2)
+        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=0, padx=0)
+        
+        # Status label for showing button instructions
+        self.status_label = tk.Label(
+            self.bottom_frame,
+            text="Ready - Click any button to see instructions",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            font=("Arial", 10),
+            bg='#e0e0e0',
+            fg='#000000',
+            padx=15,
+            pady=8,
+            wraplength=1500,
+            relief=tk.FLAT
+        )
+        self.status_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Canvas with minimum size (pack after bottom frame)
         self.image_canvas = tk.Canvas(main_frame, highlightthickness=0, bg='lightgray')
         self.image_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
         # Add a placeholder message (will be positioned after window is rendered)
         self._placeholder_text = None
         
-        # Bottom frame (kept in place for potential future use)
-        self.bottom_frame = tk.Frame(main_frame)
-        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
-        
         # Bind mouse events
         self.image_canvas.bind("<Motion>", self.update_cursor_line)
+    
+    def update_status_display(self, description: str):
+        """
+        Update the bottom status display with button information.
+        
+        Args:
+            description: Full description with instructions and shortcuts (pipe-separated format)
+        """
+        try:
+            self.status_label.config(text=description)
+            # Force update to ensure visibility
+            self.status_label.update_idletasks()
+            self.bottom_frame.update_idletasks()
+        except Exception as e:
+            logger.error(f"Error updating status display: {e}")
+    
+    def create_button_with_hint(self, parent, image, command, tooltip_text, description, shortcuts=None):
+        """
+        Create a button with tooltip and status display update.
+        
+        Args:
+            parent: Parent widget
+            image: Button icon
+            command: Command function to execute (should already call update_status_display)
+            tooltip_text: Text for tooltip
+            description: Description for status display (unused, kept for compatibility)
+            shortcuts: List of keyboard shortcuts (unused, kept for compatibility)
+        
+        Returns:
+            The created button widget
+        """
+        # Note: command already calls update_status_display, so we don't need to call it again
+        button = tk.Button(
+            parent,
+            image=image,
+            command=command,
+            width=30,
+            height=30
+        )
+        
+        # Add tooltip
+        tooltip = ToolTip(button, tooltip_text)
+        self._tooltips.append(tooltip)
+        
+        return button
     
     def create_menus(self):
         """Create menu bar."""
@@ -431,28 +600,80 @@ class PearlEditApp(BaseTk):
         
         # Process menu
         process_menu = tk.Menu(menubar, tearoff=0)
-        process_menu.add_command(label="Split Image", command=lambda: self.switch_to_vertical())
-        self.auto_split_var = tk.BooleanVar(value=self.settings.auto_split)
-        process_menu.add_checkbutton(
-            label="Split All Images",
-            variable=self.auto_split_var,
-            command=self.toggle_auto_split
+        
+        # Processing Mode submenu
+        processing_mode_menu = tk.Menu(process_menu, tearoff=0)
+        self.processing_mode_var = tk.StringVar(value="Sequential" if not self.batch_process.get() else "Batch Processing")
+        
+        def set_processing_mode(mode):
+            """Set processing mode and sync with button."""
+            self.processing_mode_var.set(mode)
+            is_batch_processing = (mode == "Batch Processing")
+            if self.batch_process.get() != is_batch_processing:
+                self.batch_process.set(is_batch_processing)
+                self.settings.batch_process = is_batch_processing
+                self.update_batch_process_icon()
+                # Update status display
+                if is_batch_processing:
+                    self.update_status_display("Batch Process: When enabled, automatically advances to next image after operations | Toggle on/off to control batch processing")
+                else:
+                    self.update_status_display("Sequential Process: Operations complete on current image only | No automatic advancement | Toggle Batch Processing to enable auto-advance")
+        
+        processing_mode_menu.add_radiobutton(
+            label="Sequential",
+            variable=self.processing_mode_var,
+            value="Sequential",
+            command=lambda: set_processing_mode("Sequential")
         )
+        processing_mode_menu.add_radiobutton(
+            label="Batch Processing",
+            variable=self.processing_mode_var,
+            value="Batch Processing",
+            command=lambda: set_processing_mode("Batch Processing")
+        )
+        process_menu.add_cascade(label="Processing Mode", menu=processing_mode_menu)
+        
+        # Apply to... submenu
+        apply_to_menu = tk.Menu(process_menu, tearoff=0)
+        self.apply_to_var = tk.StringVar(value="All Images" if self.apply_to_all.get() else "Current Image")
+        
+        def set_apply_to(mode):
+            """Set apply to mode and sync with button."""
+            self.apply_to_var.set(mode)
+            is_all = (mode == "All Images")
+            if self.apply_to_all.get() != is_all:
+                self.apply_to_all.set(is_all)
+                self.update_apply_to_all_icon()
+                # Update status display
+                if is_all:
+                    self.update_status_display("Apply to All: When enabled, operations apply to all images | When disabled, operations apply only to current image | Toggle on/off as needed")
+                else:
+                    self.update_status_display("Apply to Current: Operations apply only to current image | Enable Apply to All to process all images at once | Toggle on/off as needed")
+        
+        apply_to_menu.add_radiobutton(
+            label="Current Image",
+            variable=self.apply_to_var,
+            value="Current Image",
+            command=lambda: set_apply_to("Current Image")
+        )
+        apply_to_menu.add_radiobutton(
+            label="All Images",
+            variable=self.apply_to_var,
+            value="All Images",
+            command=lambda: set_apply_to("All Images")
+        )
+        process_menu.add_cascade(label="Apply to...", menu=apply_to_menu)
+        
         process_menu.add_separator()
+        
+        # Process menu items in toolbar order
+        process_menu.add_command(label="Split Image", command=lambda: self.switch_to_vertical())
         process_menu.add_command(label="Crop Image", command=self.activate_crop_tool)
-        process_menu.add_separator()
-        process_menu.add_command(label="Auto Crop Active Image", command=self.auto_crop_current)
-        process_menu.add_command(label="Auto Crop All Images", command=self.auto_crop_all)
-        process_menu.add_separator()
-        process_menu.add_command(label="Straighten Image by Line", command=self.manual_straighten)
-        process_menu.add_separator()
-        process_menu.add_command(label="Rotate Image Clockwise", command=lambda: self.rotate_image(-90))
-        process_menu.add_command(label="Rotate Image Counter-Clockwise", command=lambda: self.rotate_image(90))
-        process_menu.add_separator()
-        process_menu.add_command(label="Rotate Image by Angle", command=self.incremental_rotate)
-        process_menu.add_separator()
-        process_menu.add_command(label="Rotate All Images Clockwise", command=lambda: self.rotate_all_images(-90))
-        process_menu.add_command(label="Rotate All Images Counter-Clockwise", command=lambda: self.rotate_all_images(90))
+        process_menu.add_command(label="Auto Crop", command=self.auto_crop_current)
+        process_menu.add_command(label="Straighten Image", command=self.manual_straighten)
+        process_menu.add_command(label="Rotate Clockwise", command=lambda: self.rotate_image(-90))
+        process_menu.add_command(label="Rotate Counter-Clockwise", command=lambda: self.rotate_image(90))
+        
         menubar.add_cascade(label="Process", menu=process_menu)
     
     def create_key_bindings(self):
@@ -945,13 +1166,21 @@ class PearlEditApp(BaseTk):
     def toggle_auto_split(self):
         """Toggle auto-split mode."""
         self.settings.auto_split = not self.settings.auto_split
-        self.auto_split_var.set(self.settings.auto_split)
+        # Note: auto_split_var was removed from menu, but setting is still saved
     
     def toggle_batch_process(self):
         """Toggle batch process mode."""
         self.batch_process.set(not self.batch_process.get())
         self.settings.batch_process = self.batch_process.get()
         self.update_batch_process_icon()
+        # Sync with menu
+        if hasattr(self, 'processing_mode_var'):
+            self.processing_mode_var.set("Batch Processing" if self.batch_process.get() else "Sequential")
+        # Update status display
+        if self.batch_process.get():
+            self.update_status_display("Batch Process: When enabled, automatically advances to next image after operations | Toggle on/off to control batch processing")
+        else:
+            self.update_status_display("Sequential Process: Operations complete on current image only | No automatic advancement | Toggle Batch Processing to enable auto-advance")
     
     def update_batch_process_icon(self):
         """Update the batch process button icon based on current state."""
@@ -964,6 +1193,14 @@ class PearlEditApp(BaseTk):
         """Toggle apply to all images mode."""
         self.apply_to_all.set(not self.apply_to_all.get())
         self.update_apply_to_all_icon()
+        # Sync with menu
+        if hasattr(self, 'apply_to_var'):
+            self.apply_to_var.set("All Images" if self.apply_to_all.get() else "Current Image")
+        # Update status display
+        if self.apply_to_all.get():
+            self.update_status_display("Apply to All: When enabled, operations apply to all images | When disabled, operations apply only to current image | Toggle on/off as needed")
+        else:
+            self.update_status_display("Apply to Current: Operations apply only to current image | Enable Apply to All to process all images at once | Toggle on/off as needed")
     
     def update_apply_to_all_icon(self):
         """Update the apply to all button icon based on current state."""

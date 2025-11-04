@@ -8,6 +8,7 @@ A Python-based image editing tool for preprocessing transcription images with fe
 
 - **Image Splitting**: Split images vertically, horizontally, or at custom angles
 - **Auto Cropping**: Automatic cropping to largest white area with threshold adjustment
+- **Auto Straightening**: Automatically straighten images using edge detection with threshold adjustment
 - **Image Rotation**: Rotate images by 90 degrees or custom angles
 - **Batch Processing**: Process multiple images in batch mode
 - **Image Navigation**: Navigate through image collections with ease
@@ -110,6 +111,7 @@ Processed images are saved to the `pass_images` directory within the input direc
 - `Ctrl+H`: Activate horizontal split tool
 - `Ctrl+A`: Toggle auto-split mode
 - `Ctrl+L`: Straighten image by line
+- `Ctrl+Shift+L`: Auto straighten active image
 - `Ctrl+Shift+C`: Activate crop tool
 - `Ctrl+Shift+A`: Auto crop active image
 - `[` / `]`: Rotate cursor angle
@@ -123,7 +125,7 @@ Processed images are saved to the `pass_images` directory within the input direc
 - **File**: Save images, quit application
 - **Edit**: Revert images, delete current image
 - **View**: Navigate between images
-- **Process**: Split images, crop images, rotate images
+- **Process**: Split images, crop images, straighten images, rotate images
 
 ## Project Structure
 

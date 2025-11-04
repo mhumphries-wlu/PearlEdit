@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Callable
 from PIL import Image
 
 from .image_ops import (
-    auto_crop, crop_image, rotate_image, straighten_by_line,
+    auto_crop, crop_image, rotate_image, straighten_by_line, auto_straighten,
     split_image_vertical, split_image_horizontal, split_image_angled,
     ImageProcessingError
 )
@@ -773,6 +773,83 @@ class ImageService:
         
         if errors:
             error_msg = f"Errors occurred during straighten:\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_msg += f"\n...and {len(errors) - 5} more errors"
+            raise UserFacingError(error_msg)
+        
+        self.history.commit(op_id)
+        self.state.mark_changed()
+    
+    def auto_straighten_current(self) -> bool:
+        """
+        Auto-straighten the current image.
+        
+        Returns:
+            True if successful
+            
+        Raises:
+            UserFacingError: If operation fails
+        """
+        current = self.get_current_image()
+        if not current:
+            raise UserFacingError("No image selected")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        try:
+            image_path = current.current_image_path
+            affected_paths = [image_path]
+            
+            # Start history operation
+            op_id = self.history.start("auto_straighten_current", affected_paths, self.state)
+            
+            success = auto_straighten(str(image_path), self.settings.threshold)
+            if success:
+                self.history.commit(op_id)
+                self.state.mark_changed()
+            return success
+        except ImageProcessingError as e:
+            raise UserFacingError(str(e)) from e
+    
+    def auto_straighten_all(self) -> None:
+        """
+        Auto-straighten all images.
+        
+        Raises:
+            UserFacingError: If operation fails
+        """
+        total = len(self.state.images)
+        if total == 0:
+            raise UserFacingError("No images to process")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths
+        affected_paths = [record.current_image_path for record in self.state.images]
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("auto_straighten_all", affected_paths, self.state)
+        
+        errors = []
+        for record in self.state.images:
+            try:
+                image_path = record.current_image_path
+                auto_straighten(str(image_path), self.settings.threshold)
+            except ImageProcessingError as e:
+                errors.append(f"Image {record.current_image_path.name}: {str(e)}")
+        
+        if errors:
+            error_msg = f"Errors occurred during auto-straighten:\n" + "\n".join(errors[:5])
             if len(errors) > 5:
                 error_msg += f"\n...and {len(errors) - 5} more errors"
             raise UserFacingError(error_msg)

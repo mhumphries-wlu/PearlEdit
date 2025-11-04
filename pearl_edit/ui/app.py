@@ -246,6 +246,7 @@ class PearlEditApp(BaseTk):
         self.crop_icon = self.load_icon(icons_dir / "crop.png", size=(24, 24))
         self.autocrop_icon = self.load_icon(icons_dir / "autocrop.png", size=(24, 24))
         self.straighten_icon = self.load_icon(icons_dir / "straighten.png", size=(24, 24))
+        self.autostraighten_icon = self.load_icon(icons_dir / "autostraighten.png", size=(24, 24))
         
         # Navigation icons
         self.start_icon = self.load_icon(icons_dir / "start.png", size=(24, 24))
@@ -447,6 +448,19 @@ class PearlEditApp(BaseTk):
             "Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line"
         )
         self.straighten_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Left side: Auto-straighten button
+        def autostraighten_wrapper():
+            self.update_status_display("Auto Straighten Tool: Adjust threshold slider in dialog | Click Apply to straighten image | Click Cancel to abort")
+            self.auto_straighten_current()
+        self.autostraighten_button = self.create_button_with_hint(
+            image_editing_buttons,
+            self.autostraighten_icon,
+            autostraighten_wrapper,
+            "Auto Straighten\nAutomatically straighten image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+L",
+            "Auto Straighten Tool: Adjust threshold slider in dialog | Click Apply to straighten image | Click Cancel to abort"
+        )
+        self.autostraighten_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Label for Image Editing
         image_editing_label = tk.Label(
@@ -769,6 +783,7 @@ class PearlEditApp(BaseTk):
         process_menu.add_command(label="Crop Image", command=self.activate_crop_tool)
         process_menu.add_command(label="Auto Crop", command=self.auto_crop_current)
         process_menu.add_command(label="Straighten Image", command=self.manual_straighten)
+        process_menu.add_command(label="Auto Straighten", command=self.auto_straighten_current)
         process_menu.add_command(label="Rotate Clockwise", command=lambda: self.rotate_image(-90))
         process_menu.add_command(label="Rotate Counter-Clockwise", command=lambda: self.rotate_image(90))
         
@@ -789,6 +804,9 @@ class PearlEditApp(BaseTk):
         
         # Auto crop
         self.bind("<Control-Shift-a>", lambda e: self.auto_crop_current())
+        
+        # Auto straighten
+        self.bind("<Control-Shift-l>", lambda e: self.auto_straighten_current())
         
         # Cursor rotation
         self.bind("<bracketright>", lambda e: self.rotate_cursor(-1))
@@ -1864,6 +1882,98 @@ class PearlEditApp(BaseTk):
             threading.Thread(target=process, daemon=True).start()
         
         ThresholdAdjuster(self, image_path, self.service, start_crop_all)
+    
+    def auto_straighten_current(self):
+        """Auto-straighten current image or all images with threshold adjustment."""
+        current = self.service.get_current_image()
+        if not current:
+            return
+        
+        # Clear any leftover guide lines from manual straighten tool
+        self.clear_all_modes()
+        
+        image_path = current.current_image_path
+        
+        # Check if apply to all is enabled
+        if self.apply_to_all.get():
+            # Show warning if not suppressed
+            if not self.show_all_images_warning("Auto Straighten"):
+                return
+            # Use auto_straighten_all function
+            self.auto_straighten_all()
+            return
+        
+        def apply_straighten(threshold):
+            try:
+                # Update settings first
+                self.service.settings.threshold = threshold
+                # Use service method which has history tracking
+                self.service.auto_straighten_current()
+                self.show_current_image()
+                # Advance to next image if batch processing is enabled
+                if self.batch_process.get():
+                    # Check if we're not at the last image before navigating
+                    current_index = self.service.state.current_image_index
+                    total_images = len(self.service.state.images)
+                    if current_index < total_images - 1:
+                        # Navigate to next image and continue processing
+                        self.after(100, lambda: self.navigate_images(1))
+                        self.after(200, self.auto_straighten_current)
+            except UserFacingError as e:
+                messagebox.showerror("Error", str(e))
+            except Exception as e:
+                messagebox.showerror("Error", f"Error during auto-straighten: {str(e)}")
+        
+        ThresholdAdjuster(self, image_path, self.service, apply_straighten, mode='straighten')
+    
+    def auto_straighten_all(self):
+        """Auto-straighten all images with threshold adjustment."""
+        current = self.service.get_current_image()
+        if not current:
+            return
+        
+        image_path = current.current_image_path
+        
+        def start_straighten_all(threshold):
+            """Start auto-straighten all with specified settings."""
+            # Update settings
+            self.service.settings.threshold = threshold
+            
+            # Show progress window
+            progress_window = tk.Toplevel(self)
+            progress_window.title("Auto-straightening Progress")
+            progress_window.geometry("300x150")
+            progress_window.transient(self)
+            
+            progress_label = ttk.Label(progress_window, text="Processing images...", padding=10)
+            progress_label.pack()
+            
+            progress_bar = ttk.Progressbar(progress_window, length=200, mode='determinate')
+            progress_bar.pack(pady=20)
+            
+            total = len(self.service.state.images)
+            progress_bar['maximum'] = total
+            
+            def update_progress(current, total, message):
+                progress_bar['value'] = current
+                progress_label.config(text=message)
+                progress_window.update()
+            
+            self.service.set_progress_callback(update_progress)
+            
+            def process():
+                try:
+                    self.service.auto_straighten_all()
+                    progress_label.config(text="Auto-straightening completed!")
+                    self.after(1000, lambda: (progress_window.destroy(), self.show_current_image()))
+                except UserFacingError as e:
+                    messagebox.showerror("Error", str(e))
+                    progress_window.destroy()
+            
+            import threading
+            threading.Thread(target=process, daemon=True).start()
+        
+        ThresholdAdjuster(self, image_path, self.service, start_straighten_all, mode='straighten')
     
     def activate_crop_tool(self, event=None):
         """Activate crop tool."""

@@ -9,7 +9,7 @@ from PIL import Image, ImageTk
 class ThresholdAdjuster(tk.Toplevel):
     """Dialog for adjusting threshold and margin for auto-crop."""
     
-    def __init__(self, parent, image_path: Path, service, on_apply=None):
+    def __init__(self, parent, image_path: Path, service, on_apply=None, mode='crop'):
         """
         Initialize threshold adjuster.
         
@@ -17,10 +17,16 @@ class ThresholdAdjuster(tk.Toplevel):
             parent: Parent window
             image_path: Path to image to adjust
             service: ImageService instance
-            on_apply: Callback when apply is clicked (threshold, margin)
+            on_apply: Callback when apply is clicked (threshold, margin) for crop mode,
+                      or (threshold,) for straighten mode
+            mode: 'crop' or 'straighten' - determines which controls to show
         """
         super().__init__(parent)
-        self.title("Threshold Adjustment")
+        self.mode = mode
+        if mode == 'straighten':
+            self.title("Threshold Adjustment - Auto Straighten")
+        else:
+            self.title("Threshold Adjustment")
         self.parent = parent
         self.image_path = image_path
         self.service = service
@@ -87,21 +93,25 @@ class ThresholdAdjuster(tk.Toplevel):
         )
         threshold_scale.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
         
-        # Margin control
-        ttk.Label(main_frame, text="Margin:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        margin_scale = ttk.Scale(
-            main_frame,
-            from_=0,
-            to=100,
-            orient=tk.HORIZONTAL,
-            variable=self.margin_var,
-            command=lambda _: self.update_preview()
-        )
-        margin_scale.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
+        # Margin control (only show for crop mode)
+        if self.mode == 'crop':
+            ttk.Label(main_frame, text="Margin:").grid(row=2, column=0, sticky=tk.W, pady=5)
+            margin_scale = ttk.Scale(
+                main_frame,
+                from_=0,
+                to=100,
+                orient=tk.HORIZONTAL,
+                variable=self.margin_var,
+                command=lambda _: self.update_preview()
+            )
+            margin_scale.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
+            button_row = 3
+        else:
+            button_row = 2
         
         # Buttons frame
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        button_frame.grid(row=button_row, column=0, columnspan=2, pady=10)
         
         ttk.Button(button_frame, text="Apply", command=self.apply_crop).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=5)
@@ -127,19 +137,21 @@ class ThresholdAdjuster(tk.Toplevel):
             # Find the largest contour
             largest_contour = max(contours, key=cv2.contourArea)
             
-            # Draw the contour and crop rectangle
+            # Draw the contour (green outline) - always shown
             cv2.drawContours(preview, [largest_contour], -1, (0, 255, 0), 2)
             
-            # Get bounding rectangle with margin
-            x, y, w, h = cv2.boundingRect(largest_contour)
-            margin = self.margin_var.get()
-            x = max(0, x - margin)
-            y = max(0, y - margin)
-            w = min(self.width - x, w + 2 * margin)
-            h = min(self.height - y, h + 2 * margin)
-            
-            # Draw crop rectangle
-            cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 0, 255), 2)
+            # Draw crop rectangle (red) - only for crop mode
+            if self.mode == 'crop':
+                # Get bounding rectangle with margin
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                margin = self.margin_var.get()
+                x = max(0, x - margin)
+                y = max(0, y - margin)
+                w = min(self.width - x, w + 2 * margin)
+                h = min(self.height - y, h + 2 * margin)
+                
+                # Draw crop rectangle
+                cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 0, 255), 2)
         
         # Resize for preview
         preview = cv2.resize(preview, (self.preview_width, self.preview_height))
@@ -154,17 +166,22 @@ class ThresholdAdjuster(tk.Toplevel):
         self.preview_canvas.create_image(0, 0, anchor=tk.NW, image=self.preview_photo)
     
     def apply_crop(self):
-        """Apply crop with current settings."""
+        """Apply with current settings."""
         threshold = self.threshold_var.get()
-        margin = self.margin_var.get()
         
         # Update settings
         self.service.settings.threshold = threshold
-        self.service.settings.margin = margin
+        if self.mode == 'crop':
+            margin = self.margin_var.get()
+            self.service.settings.margin = margin
         
         # Call callback if provided
         if self.on_apply:
-            self.on_apply(threshold, margin)
+            if self.mode == 'crop':
+                self.on_apply(threshold, margin)
+            else:
+                # For straighten mode, callback only gets threshold
+                self.on_apply(threshold)
         
         # Close the window
         self.destroy()

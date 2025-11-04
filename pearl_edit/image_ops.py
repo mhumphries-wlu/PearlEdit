@@ -314,3 +314,107 @@ def find_optimal_threshold(image_path: str) -> int:
     
     return best_threshold
 
+
+def auto_straighten(image_path: str, threshold: int = 127) -> bool:
+    """
+    Automatically straighten image by detecting document edge using threshold.
+    
+    Uses threshold to find the largest contour, then computes the minimum area
+    rectangle to determine the dominant edge angle. Rotates to nearest 0°/90°.
+    
+    Args:
+        image_path: Path to the image file
+        threshold: Threshold value for binary conversion (0-255)
+        
+    Returns:
+        True if successful
+        
+    Raises:
+        ImageProcessingError: If straightening fails
+    """
+    try:
+        import math
+        
+        # Load image
+        image = cv2.imread(image_path)
+        if image is None:
+            raise ImageProcessingError(f"Failed to load image: {image_path}")
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply threshold
+        _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+        
+        # Optional: Apply slight morphology to stabilize contours
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+        
+        # Find contours
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            raise ImageProcessingError("No contours found in image")
+        
+        # Find the largest contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Check if contour is large enough (at least 1% of image area)
+        height, width = image.shape[:2]
+        min_area = (width * height) * 0.01
+        if cv2.contourArea(largest_contour) < min_area:
+            raise ImageProcessingError("Document contour too small to detect orientation")
+        
+        # Get minimum area rectangle
+        rect = cv2.minAreaRect(largest_contour)
+        # rect format: ((center_x, center_y), (width, height), angle)
+        # In OpenCV, width is always >= height, and angle is in [-90, 0) degrees
+        # The angle represents the rotation of the width (longest) side relative to horizontal
+        _, (w, h), theta = rect
+        
+        # Theta is in [-90, 0) range (negative = clockwise from horizontal)
+        # We want to determine if the longest side is closer to horizontal or vertical
+        # and rotate accordingly to 0° (horizontal) or 90° (vertical)
+        
+        # Convert theta to a positive angle in [0, 90) for easier logic
+        # If theta is -30°, the side is rotated 30° clockwise from horizontal
+        # We want to rotate it back 30° counter-clockwise to make it horizontal
+        abs_theta = abs(theta)  # Angle in [0, 90) range
+        
+        # Determine target orientation: if angle < 45°, rotate to horizontal (0°)
+        # If angle >= 45°, rotate to vertical (90°)
+        if abs_theta <= 45:
+            # Closer to horizontal, rotate to 0°
+            # Rotation needed is counter-clockwise by abs_theta degrees
+            rotation_needed = abs_theta
+        else:
+            # Closer to vertical (45° to 90°), rotate to 90°
+            # We need to rotate by (90 - abs_theta) degrees counter-clockwise
+            # But we also need to account for the direction
+            # If theta is -60°, abs_theta = 60°, we need to rotate 30° counter-clockwise
+            rotation_needed = 90 - abs_theta
+        
+        # The rotation direction: counter-clockwise (positive) to straighten
+        # Since theta is negative (clockwise), we rotate positive (counter-clockwise)
+        # So rotation_needed is already positive and correct
+        
+        # Normalize rotation to smallest angle (mirror straighten_by_line logic)
+        if abs(rotation_needed) > 90:
+            if rotation_needed > 0:
+                rotation_needed -= 180
+            else:
+                rotation_needed += 180
+        
+        # Only rotate if significant correction is needed (avoid micro-rotations)
+        if abs(rotation_needed) < 0.5:
+            logger.info(f"Image already straight (detected angle: {abs_theta:.2f}°)")
+            return True
+        
+        # Rotate the image
+        return rotate_image(image_path, rotation_needed)
+        
+    except ImageProcessingError:
+        raise
+    except Exception as e:
+        logger.error(f"Error during auto-straighten: {e}")
+        raise ImageProcessingError(f"Error during auto-straighten: {str(e)}") from e

@@ -16,6 +16,7 @@ from .repository import (
 from .state import SessionState, ImageRecord
 from .paths import TempManager, pass_images_for, PathError
 from .config import AppSettings
+from .history import HistoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class ImageService:
         self.temp_manager = temp_manager
         self.state = SessionState()
         self._progress_callback: Optional[Callable[[int, int, str], None]] = None
+        self.history = HistoryManager(temp_manager.path if temp_manager.path else None)
     
     def set_progress_callback(self, callback: Callable[[int, int, str], None]) -> None:
         """Set callback for progress updates (current, total, message)."""
@@ -208,10 +210,23 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
             image_path = current.current_image_path
+            affected_paths = [image_path]
+            
+            # Start history operation
+            op_id = self.history.start("auto_crop_current", affected_paths, self.state)
+            
             success = auto_crop(str(image_path), self.settings.threshold, self.settings.margin)
             if success:
+                self.history.commit(op_id)
                 self.state.mark_changed()
             return success
         except ImageProcessingError as e:
@@ -227,6 +242,19 @@ class ImageService:
         total = len(self.state.images)
         if total == 0:
             raise UserFacingError("No images to process")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths
+        affected_paths = [record.current_image_path for record in self.state.images]
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("auto_crop_all", affected_paths, self.state)
         
         errors = []
         for i, record in enumerate(self.state.images):
@@ -245,6 +273,7 @@ class ImageService:
                 error_msg += f"\n...and {len(errors) - 5} more errors"
             raise UserFacingError(error_msg)
         
+        self.history.commit(op_id)
         self.state.mark_changed()
     
     def crop_current(self, coords: Tuple[int, int, int, int]) -> bool:
@@ -264,9 +293,22 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
             image_path = current.current_image_path
+            affected_paths = [image_path]
+            
+            # Start history operation
+            op_id = self.history.start("crop_current", affected_paths, self.state)
+            
             crop_image(str(image_path), coords)
+            self.history.commit(op_id)
             self.state.mark_changed()
             return True
         except ImageProcessingError as e:
@@ -306,7 +348,18 @@ class ImageService:
         if current.left_or_right is not None:
             raise UserFacingError("This image is already split. Please select an unsplit image.")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
+            # Start history operation
+            affected_paths = [image_path]
+            op_id = self.history.start("split_current", affected_paths, self.state)
+            
             # Load image
             with Image.open(image_path) as img:
                 image = img.convert("RGB")
@@ -358,6 +411,8 @@ class ImageService:
                 for i, img in enumerate(self.state.images):
                     img.image_index = i + 1
                 
+                # Commit with created files
+                self.history.commit(op_id, created_paths=[left_path, right_path])
                 self.state.mark_changed()
                 return True
                 
@@ -366,6 +421,137 @@ class ImageService:
         except Exception as e:
             logger.error(f"Error splitting image: {e}")
             raise UserFacingError(f"Error splitting image: {str(e)}") from e
+    
+    def split_all(
+        self,
+        orientation: str,
+        split_coord: Optional[int] = None,
+        line_coords: Optional[Tuple[int, int, int, int]] = None,
+        angle: Optional[float] = None
+    ) -> None:
+        """
+        Split all unsplit images.
+        
+        Args:
+            orientation: 'vertical', 'horizontal', or 'angled'
+            split_coord: X or Y coordinate for straight splits
+            line_coords: Line coordinates for angled splits
+            angle: Angle for angled splits
+            
+        Raises:
+            UserFacingError: If operation fails
+        """
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths (all original images that aren't split)
+        affected_paths = []
+        unsplit_indices = []
+        for i, record in enumerate(self.state.images):
+            if record.left_or_right is None:
+                affected_paths.append(record.original_image)
+                unsplit_indices.append(i)
+        
+        if not affected_paths:
+            raise UserFacingError("No unsplit images to process")
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("split_all", affected_paths, self.state)
+        
+        errors = []
+        created_files = []
+        current_idx = 0
+        
+        # Process unsplit images (skip already-split ones)
+        while current_idx < len(self.state.images):
+            record = self.state.images[current_idx]
+            
+            # Skip if already split
+            if record.left_or_right is not None:
+                current_idx += 1
+                continue
+            
+            try:
+                # Set current index for proper state tracking
+                self.state.current_image_index = current_idx
+                
+                # Perform split using split_current logic
+                image_path = record.original_image
+                
+                with Image.open(image_path) as img:
+                    image = img.convert("RGB")
+                    width, height = image.size
+                    
+                    # Perform split based on orientation
+                    if orientation == 'vertical':
+                        if split_coord is None:
+                            raise UserFacingError("Split coordinate required for vertical split")
+                        left_img, right_img = split_image_vertical(image, split_coord)
+                    elif orientation == 'horizontal':
+                        if split_coord is None:
+                            raise UserFacingError("Split coordinate required for horizontal split")
+                        left_img, right_img = split_image_horizontal(image, split_coord)
+                    elif orientation == 'angled':
+                        if line_coords is None:
+                            raise UserFacingError("Line coordinates required for angled split")
+                        base_orient = 'vertical' if angle and angle < 45 else 'horizontal'
+                        left_img, right_img = split_image_angled(image, line_coords, base_orient)
+                    else:
+                        raise UserFacingError(f"Invalid orientation: {orientation}")
+                    
+                    # Generate filenames
+                    left_path = generate_split_filename(image_path, record.image_index, False)
+                    right_path = generate_split_filename(image_path, record.image_index, True)
+                    
+                    # Save split images
+                    left_img.save(str(left_path), 'JPEG', quality=self.settings.default_quality, optimize=True)
+                    right_img.save(str(right_path), 'JPEG', quality=self.settings.default_quality, optimize=True)
+                    
+                    created_files.extend([left_path, right_path])
+                    
+                    # Update records
+                    record.split_image = left_path
+                    record.left_or_right = 'Left'
+                    
+                    # Create right image record
+                    right_record = ImageRecord(
+                        image_index=len(self.state.images) + 1,
+                        original_image=record.original_image,
+                        split_image=right_path,
+                        left_or_right='Right'
+                    )
+                    
+                    # Insert right record after current
+                    self.state.images.insert(current_idx + 1, right_record)
+                    
+                    # Reindex
+                    for i, img in enumerate(self.state.images):
+                        img.image_index = i + 1
+                    
+                    # Skip both left and right, move to next unsplit
+                    current_idx += 2
+                    
+            except ImageProcessingError as e:
+                errors.append(f"Image {record.original_image.name}: {str(e)}")
+                current_idx += 1
+            except Exception as e:
+                logger.error(f"Error splitting image {record.original_image.name}: {e}")
+                errors.append(f"Image {record.original_image.name}: {str(e)}")
+                current_idx += 1
+        
+        if errors:
+            error_msg = f"Errors occurred during split:\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_msg += f"\n...and {len(errors) - 5} more errors"
+            raise UserFacingError(error_msg)
+        
+        # Commit with all created files
+        self.history.commit(op_id, created_paths=created_files)
+        self.state.mark_changed()
     
     def rotate_current(self, angle: float) -> bool:
         """
@@ -384,9 +570,22 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
             image_path = current.current_image_path
+            affected_paths = [image_path]
+            
+            # Start history operation
+            op_id = self.history.start("rotate_current", affected_paths, self.state)
+            
             rotate_image(str(image_path), angle)
+            self.history.commit(op_id)
             self.state.mark_changed()
             return True
         except ImageProcessingError as e:
@@ -402,6 +601,19 @@ class ImageService:
         Raises:
             UserFacingError: If operation fails
         """
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths
+        affected_paths = [record.current_image_path for record in self.state.images]
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("rotate_all", affected_paths, self.state)
+        
         errors = []
         for record in self.state.images:
             try:
@@ -414,6 +626,51 @@ class ImageService:
             error_msg = f"Errors occurred during rotation:\n" + "\n".join(errors[:5])
             raise UserFacingError(error_msg)
         
+        self.history.commit(op_id)
+        self.state.mark_changed()
+    
+    def crop_all(self, coords: Tuple[int, int, int, int]) -> None:
+        """
+        Crop all images to specified coordinates.
+        
+        Args:
+            coords: Tuple of (left, top, right, bottom)
+            
+        Raises:
+            UserFacingError: If operation fails
+        """
+        total = len(self.state.images)
+        if total == 0:
+            raise UserFacingError("No images to process")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths
+        affected_paths = [record.current_image_path for record in self.state.images]
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("crop_all", affected_paths, self.state)
+        
+        errors = []
+        for record in self.state.images:
+            try:
+                image_path = record.current_image_path
+                crop_image(str(image_path), coords)
+            except ImageProcessingError as e:
+                errors.append(f"Image {record.current_image_path.name}: {str(e)}")
+        
+        if errors:
+            error_msg = f"Errors occurred during crop:\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_msg += f"\n...and {len(errors) - 5} more errors"
+            raise UserFacingError(error_msg)
+        
+        self.history.commit(op_id)
         self.state.mark_changed()
     
     def straighten_current(self, start: Tuple[int, int], end: Tuple[int, int]) -> bool:
@@ -434,13 +691,71 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
             image_path = current.current_image_path
+            affected_paths = [image_path]
+            
+            # Start history operation
+            op_id = self.history.start("straighten_current", affected_paths, self.state)
+            
             straighten_by_line(str(image_path), start, end)
+            self.history.commit(op_id)
             self.state.mark_changed()
             return True
         except ImageProcessingError as e:
             raise UserFacingError(str(e)) from e
+    
+    def straighten_all(self, start: Tuple[int, int], end: Tuple[int, int]) -> None:
+        """
+        Straighten all images by line.
+        
+        Args:
+            start: Start point (x, y)
+            end: End point (x, y)
+            
+        Raises:
+            UserFacingError: If operation fails
+        """
+        total = len(self.state.images)
+        if total == 0:
+            raise UserFacingError("No images to process")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths
+        affected_paths = [record.current_image_path for record in self.state.images]
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("straighten_all", affected_paths, self.state)
+        
+        errors = []
+        for record in self.state.images:
+            try:
+                image_path = record.current_image_path
+                straighten_by_line(str(image_path), start, end)
+            except ImageProcessingError as e:
+                errors.append(f"Image {record.current_image_path.name}: {str(e)}")
+        
+        if errors:
+            error_msg = f"Errors occurred during straighten:\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_msg += f"\n...and {len(errors) - 5} more errors"
+            raise UserFacingError(error_msg)
+        
+        self.history.commit(op_id)
+        self.state.mark_changed()
     
     def delete_current(self) -> bool:
         """
@@ -456,18 +771,36 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
+            # Collect affected paths
+            affected_paths = []
+            if current.split_image and current.split_image.exists():
+                affected_paths.append(current.split_image)
+            original_count = sum(1 for img in self.state.images if img.original_image == current.original_image)
+            if original_count == 1:
+                affected_paths.append(current.original_image)
+            
+            # Start history operation
+            op_id = self.history.start("delete_current", affected_paths, self.state)
+            
             # Remove split image if it exists
             if current.split_image and current.split_image.exists():
                 remove_image(current.split_image)
             
             # Remove original if it's not shared
-            original_count = sum(1 for img in self.state.images if img.original_image == current.original_image)
             if original_count == 1:
                 remove_image(current.original_image)
             
             # Remove from state
             self.state.remove_image(self.state.current_image_index)
+            self.history.commit(op_id)
             self.state.mark_changed()
             return True
         except Exception as e:
@@ -488,10 +821,25 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
         try:
             originals_dir = self.temp_manager.originals_path
             if not originals_dir:
                 raise UserFacingError("Originals backup directory not available")
+            
+            # Collect affected paths
+            affected_paths = [current.original_image]
+            if current.split_image and current.split_image.exists():
+                affected_paths.append(current.split_image)
+            
+            # Start history operation
+            op_id = self.history.start("revert_current", affected_paths, self.state)
             
             # Restore original
             restored = restore_from_backup(current.original_image, originals_dir)
@@ -506,6 +854,7 @@ class ImageService:
             current.split_image = None
             current.left_or_right = None
             
+            self.history.commit(op_id)
             self.state.mark_changed()
             return True
         except RepositoryError as e:
@@ -521,6 +870,23 @@ class ImageService:
         originals_dir = self.temp_manager.originals_path
         if not originals_dir:
             raise UserFacingError("Originals backup directory not available")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        # Collect all affected paths
+        affected_paths = []
+        for record in self.state.images:
+            affected_paths.append(record.original_image)
+            if record.split_image and record.split_image.exists():
+                affected_paths.append(record.split_image)
+        
+        # Start history operation (single entry for batch)
+        op_id = self.history.start("revert_all", affected_paths, self.state)
         
         errors = []
         processed_originals = set()
@@ -554,6 +920,8 @@ class ImageService:
             for i, orig in enumerate(sorted(processed_originals))
         ]
         self.state.current_image_index = 0
+        
+        self.history.commit(op_id)
         self.state.mark_changed()
         
         if errors:
@@ -598,7 +966,52 @@ class ImageService:
         except (RepositoryError, PathError) as e:
             raise UserFacingError(str(e)) from e
     
+    def undo(self) -> bool:
+        """
+        Undo the last operation.
+        
+        Returns:
+            True if undo was successful
+        """
+        if not self.history.can_undo():
+            return False
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        success = self.history.undo(self.state)
+        if success:
+            self.state.mark_changed()
+        return success
+    
+    def redo(self) -> bool:
+        """
+        Redo the last undone operation.
+        
+        Returns:
+            True if redo was successful
+        """
+        if not self.history.can_redo():
+            return False
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        success = self.history.redo(self.state)
+        if success:
+            self.state.mark_changed()
+        return success
+    
     def cleanup(self) -> None:
         """Clean up temporary resources."""
+        self.history.cleanup()
         self.temp_manager.cleanup()
 

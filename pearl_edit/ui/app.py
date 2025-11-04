@@ -584,6 +584,9 @@ class PearlEditApp(BaseTk):
         
         # Edit menu
         edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Undo", command=self.undo_operation, accelerator="Ctrl+Z")
+        edit_menu.add_command(label="Redo", command=self.redo_operation, accelerator="Ctrl+Y")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Revert Current Image", command=self.revert_current)
         edit_menu.add_command(label="Revert All Images", command=self.revert_all)
         edit_menu.add_separator()
@@ -713,6 +716,10 @@ class PearlEditApp(BaseTk):
         self.bind("<Control-i>", lambda e: self.import_images())
         self.bind("<Control-s>", lambda e: self.save_images())
         self.bind("<Control-Shift-s>", lambda e: self.save_images_as())
+        
+        # Undo/Redo
+        self.bind("<Control-z>", lambda e: self.undo_operation())
+        self.bind("<Control-y>", lambda e: self.redo_operation())
     
     def setup_drag_drop(self):
         """Setup drag and drop support for image files."""
@@ -1391,68 +1398,31 @@ class PearlEditApp(BaseTk):
             # Show warning if not suppressed
             if not self.show_all_images_warning("Split"):
                 return
-            # Apply split to original (unsplit) images only
-            # Follow the pattern from image_splitter.py: loop through indices,
-            # skip already-split images, and increment by 2 after each split
+            # Use batch split API
             try:
                 initial_index = self.service.state.current_image_index
-                restored_index = None
-                errors = []
-                processed_count = 0
-                current_idx = 0
+                self.service.split_all(orientation, split_coord, line_coords)
                 
-                # Loop through all images, skipping already-split ones
-                while current_idx < len(self.service.state.images):
-                    current_record = self.service.state.images[current_idx]
-                    
-                    # Skip if already split (has left_or_right set)
-                    if current_record.left_or_right is not None:
-                        current_idx += 1
-                        continue
-                    
-                    # This is an unsplit image - split it
-                    processed_count += 1
-                    self.service.state.current_image_index = current_idx
-                    self.show_current_image()
-                    self.update()
-                    
-                    try:
-                        self.service.split_current(orientation, split_coord, line_coords)
-                        # Track where the original image's left split ended up
-                        if current_idx == initial_index and restored_index is None:
-                            restored_index = current_idx
-                    except UserFacingError as e:
-                        errors.append(f"Image {processed_count}: {str(e)}")
-                        current_idx += 1  # Move to next even on error
-                        continue
-                    
-                    # After splitting, increment by 2 to skip both left and right splits
-                    # The split creates: [original becomes left] [new right]
-                    # So we skip to the next unsplit image (which is 2 positions away)
-                    current_idx += 2
-
-                # Restore to the left split of the originally selected image
-                if restored_index is None:
-                    # Find the left split of the first processed image
-                    for i, img in enumerate(self.service.state.images):
-                        if img.left_or_right == 'Left':
+                # Find the left split of the originally selected image
+                restored_index = None
+                for i, img in enumerate(self.service.state.images):
+                    if img.left_or_right == 'Left':
+                        if restored_index is None:
+                            restored_index = i
+                        # Try to find one that matches the original index range
+                        if initial_index <= i <= initial_index + 1:
                             restored_index = i
                             break
-                    if restored_index is None:
-                        restored_index = 0
-
+                
+                if restored_index is None:
+                    restored_index = 0
+                
                 restored_index = min(restored_index, len(self.service.state.images) - 1)
                 self.service.state.current_image_index = restored_index
                 self.show_current_image()
                 self.update_counter()
-
-                if errors:
-                    error_msg = "Errors occurred during split:\n" + "\n".join(errors[:5])
-                    if len(errors) > 5:
-                        error_msg += f"\n...and {len(errors) - 5} more errors"
-                    messagebox.showwarning("Split Warnings", error_msg)
-            except Exception as e:
-                messagebox.showerror("Error", f"Error splitting images: {str(e)}")
+            except UserFacingError as e:
+                messagebox.showerror("Error", str(e))
         else:
             # Split current image only
             try:
@@ -1482,14 +1452,18 @@ class PearlEditApp(BaseTk):
         
         def apply_crop(threshold, margin):
             try:
-                from ..image_ops import auto_crop
-                auto_crop(str(image_path), threshold, margin)
-                self.service.state.mark_changed()
+                # Update settings first
+                self.service.settings.threshold = threshold
+                self.service.settings.margin = margin
+                # Use service method which has history tracking
+                self.service.auto_crop_current()
                 self.show_current_image()
                 # Advance to next image if batch processing is enabled
                 if self.batch_process.get():
                     self.after(100, lambda: self.navigate_images(1))
                     self.after(200, self.auto_crop_current)
+            except UserFacingError as e:
+                messagebox.showerror("Error", str(e))
             except Exception as e:
                 messagebox.showerror("Error", f"Error during auto-crop: {str(e)}")
         
@@ -1592,31 +1566,17 @@ class PearlEditApp(BaseTk):
                 crop_coords = (left, top, right, bottom)
                 
                 if self.apply_to_all.get():
-                    # Apply crop to all images
+                    # Apply crop to all images using batch API
                     try:
-                        total = len(self.service.state.images)
                         original_index = self.service.state.current_image_index
-                        errors = []
-                        
-                        for i in range(total):
-                            self.service.state.current_image_index = i
-                            self.show_current_image()
-                            self.update()
-                            
-                            try:
-                                self.service.crop_current(crop_coords)
-                            except UserFacingError as e:
-                                errors.append(f"Image {i+1}: {str(e)}")
-                        
+                        self.service.crop_all(crop_coords)
                         # Restore original position
                         self.service.state.current_image_index = original_index
                         self.show_current_image()
-                        
-                        if errors:
-                            error_msg = "Errors occurred during crop:\n" + "\n".join(errors[:5])
-                            if len(errors) > 5:
-                                error_msg += f"\n...and {len(errors) - 5} more errors"
-                            messagebox.showwarning("Crop Warnings", error_msg)
+                    except UserFacingError as e:
+                        messagebox.showerror("Error", str(e))
+                        self.clear_all_modes()
+                        return
                     except Exception as e:
                         messagebox.showerror("Error", f"Error cropping images: {str(e)}")
                         self.clear_all_modes()
@@ -1688,31 +1648,17 @@ class PearlEditApp(BaseTk):
             end_img = (int(end[0] / self.current_scale), int(end[1] / self.current_scale))
             
             if self.apply_to_all.get():
-                # Apply straighten to all images
+                # Apply straighten to all images using batch API
                 try:
-                    total = len(self.service.state.images)
                     original_index = self.service.state.current_image_index
-                    errors = []
-                    
-                    for i in range(total):
-                        self.service.state.current_image_index = i
-                        self.show_current_image()
-                        self.update()
-                        
-                        try:
-                            self.service.straighten_current(start_img, end_img)
-                        except UserFacingError as e:
-                            errors.append(f"Image {i+1}: {str(e)}")
-                    
+                    self.service.straighten_all(start_img, end_img)
                     # Restore original position
                     self.service.state.current_image_index = original_index
                     self.show_current_image()
-                    
-                    if errors:
-                        error_msg = "Errors occurred during straighten:\n" + "\n".join(errors[:5])
-                        if len(errors) > 5:
-                            error_msg += f"\n...and {len(errors) - 5} more errors"
-                        messagebox.showwarning("Straighten Warnings", error_msg)
+                except UserFacingError as e:
+                    messagebox.showerror("Error", str(e))
+                    cleanup()
+                    return
                 except Exception as e:
                     messagebox.showerror("Error", f"Error straightening images: {str(e)}")
                     cleanup()
@@ -1778,6 +1724,32 @@ class PearlEditApp(BaseTk):
         )
         if angle is not None:
             self.rotate_image(angle)
+    
+    def undo_operation(self):
+        """Undo the last operation."""
+        try:
+            success = self.service.undo()
+            if success:
+                self.show_current_image()
+                self.update_counter()
+            else:
+                messagebox.showinfo("Undo", "Nothing to undo.")
+        except Exception as e:
+            logger.error(f"Error during undo: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to undo: {str(e)}")
+    
+    def redo_operation(self):
+        """Redo the last undone operation."""
+        try:
+            success = self.service.redo()
+            if success:
+                self.show_current_image()
+                self.update_counter()
+            else:
+                messagebox.showinfo("Redo", "Nothing to redo.")
+        except Exception as e:
+            logger.error(f"Error during redo: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to redo: {str(e)}")
     
     def delete_current(self):
         """Delete current image."""

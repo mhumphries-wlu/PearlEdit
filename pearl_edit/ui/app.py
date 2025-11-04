@@ -113,8 +113,18 @@ class PearlEditApp(BaseTk):
         self._tooltips = []
         
         # UI state
-        self.current_scale = 1.0
+        self.current_scale = 1.0  # Fit-to-window scale
+        self.zoom_level = 1.0  # Current zoom level (1.0 = fit to window)
+        self.pan_x = 0  # Pan offset in x direction
+        self.pan_y = 0  # Pan offset in y direction
+        self.panning = False  # Whether panning mode is active
+        self.pan_start_x = 0  # Starting x position for pan
+        self.pan_start_y = 0  # Starting y position for pan
         self.original_image = None
+        self._cached_photo = None  # Cached PhotoImage for smooth updates
+        self._cached_zoom = 1.0  # Zoom level of cached image
+        self._image_item = None  # Canvas item ID for the image
+        self._zoom_update_pending = False  # Throttle zoom updates
         self.special_cursor_active = False
         self.cursor_orientation = 'vertical'
         self.cursor_angle = 0
@@ -259,25 +269,33 @@ class PearlEditApp(BaseTk):
         self.toolbar_frame = tk.Frame(self, relief=tk.RAISED, borderwidth=1)
         self.toolbar_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
         
-        # Left side: New (Reset) button
-        def reset_wrapper():
-            self.update_status_display("Reset Tool: Clears all loaded images and resets application to initial state | All unsaved changes will be lost")
+        # Create section containers with labels
+        # File Operations section
+        file_ops_section = tk.Frame(self.toolbar_frame)
+        file_ops_section.pack(side=tk.LEFT, padx=2)
+        
+        file_ops_buttons = tk.Frame(file_ops_section)
+        file_ops_buttons.pack(side=tk.TOP, pady=2)
+        
+        # Left side: New button
+        def new_wrapper():
+            self.update_status_display("New: Clears all loaded images and resets application to initial state | All unsaved changes will be lost")
             self.reset_program()
-        self.reset_button = self.create_button_with_hint(
-            self.toolbar_frame,
+        self.new_button = self.create_button_with_hint(
+            file_ops_buttons,
             self.reset_icon,
-            reset_wrapper,
-            "Reset Program\nClear all loaded images",
-            "Reset Tool: Clears all loaded images and resets application to initial state | All unsaved changes will be lost"
+            new_wrapper,
+            "New\nClear all loaded images",
+            "New: Clears all loaded images and resets application to initial state | All unsaved changes will be lost"
         )
-        self.reset_button.pack(side=tk.LEFT, padx=5, pady=2)
+        self.new_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Left side: Open button
         def open_wrapper():
             self.update_status_display("Import Tool: Select image files (.jpg, .jpeg) to import | Shortcut: Ctrl+I | Or drag and drop images onto canvas")
             self.import_images()
         self.open_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            file_ops_buttons,
             self.open_icon,
             open_wrapper,
             "Import Images\nSelect image files to import\nShortcut: Ctrl+I",
@@ -290,7 +308,7 @@ class PearlEditApp(BaseTk):
             self.update_status_display("Save Tool: Saves all processed images to current directory | Shortcut: Ctrl+S | Use Save As (Ctrl+Shift+S) to choose location")
             self.save_images()
         self.save_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            file_ops_buttons,
             self.save_icon,
             save_wrapper,
             "Save Images\nSave processed images to current directory\nShortcut: Ctrl+S",
@@ -298,9 +316,25 @@ class PearlEditApp(BaseTk):
         )
         self.save_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Divider after Save
+        # Label for File Operations
+        file_ops_label = tk.Label(
+            file_ops_section,
+            text="File Operations",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        file_ops_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        
+        # Divider after File Operations
         separator = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
         separator.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        
+        # Processing section
+        processing_section = tk.Frame(self.toolbar_frame)
+        processing_section.pack(side=tk.LEFT, padx=2)
+        
+        processing_buttons = tk.Frame(processing_section)
+        processing_buttons.pack(side=tk.TOP, pady=2)
         
         # Batch Process toggle button
         self.batch_process = tk.BooleanVar(value=self.settings.batch_process)
@@ -312,7 +346,7 @@ class PearlEditApp(BaseTk):
             self.toggle_batch_process()
         
         self.batch_process_button = tk.Button(
-            self.toolbar_frame,
+            processing_buttons,
             image=initial_icon,
             command=batch_process_wrapper,
             width=30,
@@ -332,7 +366,7 @@ class PearlEditApp(BaseTk):
             self.toggle_apply_to_all()
         
         self.apply_to_all_button = tk.Button(
-            self.toolbar_frame,
+            processing_buttons,
             image=self.current_page_icon,
             command=apply_to_all_wrapper,
             width=30,
@@ -342,12 +376,32 @@ class PearlEditApp(BaseTk):
         self.apply_to_all_button.pack(side=tk.LEFT, padx=5, pady=2)
         self._tooltips.append(ToolTip(self.apply_to_all_button, "Apply to All\nToggle whether operations apply to\ncurrent image or all images"))
         
+        # Label for Processing
+        processing_label = tk.Label(
+            processing_section,
+            text="Processing Type",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        processing_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        
+        # Divider after Processing (NEW - between Processing and Image Editing)
+        separator_processing = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
+        separator_processing.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        
+        # Image Editing section
+        image_editing_section = tk.Frame(self.toolbar_frame)
+        image_editing_section.pack(side=tk.LEFT, padx=2)
+        
+        image_editing_buttons = tk.Frame(image_editing_section)
+        image_editing_buttons.pack(side=tk.TOP, pady=2)
+        
         # Left side: Split button with icon
         def split_wrapper():
             self.update_status_display("Split Tool: To change between Horizontal and Vertical Cursor use Ctrl+H and Ctrl+V | To rotate cursor use [ and ] | To split image, click mouse")
             self.switch_to_vertical()
         self.split_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            image_editing_buttons,
             self.split_icon,
             split_wrapper,
             "Split Image\nActivate vertical split cursor\nClick to split at cursor position\nShortcuts: Ctrl+V (vertical), Ctrl+H (horizontal)",
@@ -360,7 +414,7 @@ class PearlEditApp(BaseTk):
             self.update_status_display("Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape")
             self.activate_crop_tool()
         self.crop_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            image_editing_buttons,
             self.crop_icon,
             crop_wrapper,
             "Crop Tool\nActivate crop mode\nDrag to select area\nEnter to apply, Escape to cancel\nShortcut: Ctrl+Shift+C",
@@ -373,7 +427,7 @@ class PearlEditApp(BaseTk):
             self.update_status_display("Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort")
             self.auto_crop_current()
         self.autocrop_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            image_editing_buttons,
             self.autocrop_icon,
             autocrop_wrapper,
             "Auto Crop\nAutomatically crop image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+A",
@@ -386,7 +440,7 @@ class PearlEditApp(BaseTk):
             self.update_status_display("Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line")
             self.manual_straighten()
         self.straighten_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            image_editing_buttons,
             self.straighten_icon,
             straighten_wrapper,
             "Straighten Image\nDraw a line to straighten image\nClick start point, then end point\nShortcut: Ctrl+L",
@@ -394,96 +448,136 @@ class PearlEditApp(BaseTk):
         )
         self.straighten_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Spacer to push navigation to the right
-        tk.Frame(self.toolbar_frame, width=20).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        
-        # Right side: Navigation buttons (order: start, back, counter, forward, end)
-        # Pack in reverse order since RIGHT packs from right to left
-        def end_wrapper():
-            self.update_status_display("Navigation Tool: Jump to last image in collection | Use arrow buttons or Left/Right arrow keys to navigate")
-            self.navigate_images(2)
-        self.end_button = self.create_button_with_hint(
-            self.toolbar_frame,
-            self.end_icon,
-            end_wrapper,
-            "Last Image\nGo to the last image",
-            "Navigation Tool: Jump to last image in collection | Use arrow buttons or Left/Right arrow keys to navigate"
+        # Label for Image Editing
+        image_editing_label = tk.Label(
+            image_editing_section,
+            text="Image Editing",
+            font=("Arial", 7),
+            fg="gray"
         )
-        self.end_button.pack(side=tk.RIGHT, padx=5)
+        image_editing_label.pack(side=tk.BOTTOM, pady=(0, 2))
         
-        def forward_wrapper():
-            self.update_status_display("Navigation Tool: Move to next image | Shortcut: Right Arrow | Use First/Last buttons to jump to ends")
-            self.navigate_images(1)
-        self.forward_button = self.create_button_with_hint(
-            self.toolbar_frame,
-            self.forward_icon,
-            forward_wrapper,
-            "Next Image\nNavigate to next image\nShortcut: Right Arrow",
-            "Navigation Tool: Move to next image | Shortcut: Right Arrow | Use First/Last buttons to jump to ends"
-        )
-        self.forward_button.pack(side=tk.RIGHT, padx=5)
+        # Divider after Image Editing
+        separator_image_editing = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
+        separator_image_editing.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
         
-        # Counter between back and forward
-        self.counter_label = ttk.Label(
-            self.toolbar_frame,
-            text="0 / 0",
-            font=("Arial", 10),
-            padding=(5, 0)
-        )
-        self.counter_label.pack(side=tk.RIGHT, padx=10)
+        # Rotation section (left side, after Image Editing)
+        rotation_section = tk.Frame(self.toolbar_frame)
+        rotation_section.pack(side=tk.LEFT, padx=2)
         
-        def back_wrapper():
-            self.update_status_display("Navigation Tool: Move to previous image | Shortcut: Left Arrow | Counter shows current position (e.g., 3 / 10)")
-            self.navigate_images(-1)
-        self.back_button = self.create_button_with_hint(
-            self.toolbar_frame,
-            self.back_icon,
-            back_wrapper,
-            "Previous Image\nNavigate to previous image\nShortcut: Left Arrow",
-            "Navigation Tool: Move to previous image | Shortcut: Left Arrow | Counter shows current position (e.g., 3 / 10)"
-        )
-        self.back_button.pack(side=tk.RIGHT, padx=5)
+        rotation_buttons = tk.Frame(rotation_section)
+        rotation_buttons.pack(side=tk.TOP, pady=2)
         
-        def start_wrapper():
-            self.update_status_display("Navigation Tool: Jump to first image in collection | Use arrow buttons or Left/Right arrow keys to navigate")
-            self.navigate_images(-2)
-        self.start_button = self.create_button_with_hint(
-            self.toolbar_frame,
-            self.start_icon,
-            start_wrapper,
-            "First Image\nGo to the first image",
-            "Navigation Tool: Jump to first image in collection | Use arrow buttons or Left/Right arrow keys to navigate"
-        )
-        self.start_button.pack(side=tk.RIGHT, padx=5)
-        
-        # Divider between rotation buttons and navigation buttons
-        separator2 = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
-        separator2.pack(side=tk.RIGHT, padx=10, pady=5, fill=tk.Y)
-        
-        # Rotate buttons on the right (pack in reverse order: right, then left)
+        # Rotate buttons
         def rotate_right_wrapper():
             self.update_status_display("Rotate Tool: Rotates image 90 degrees clockwise | Shortcut: Ctrl+] | Use Apply to All to rotate all images")
-            self.rotate_image(90)
+            self.rotate_image(-90)
         self.rotate_right_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            rotation_buttons,
             self.rotate_right_icon,
             rotate_right_wrapper,
             "Rotate Clockwise\nRotate image 90° clockwise\nShortcut: Ctrl+]",
             "Rotate Tool: Rotates image 90 degrees clockwise | Shortcut: Ctrl+] | Use Apply to All to rotate all images"
         )
-        self.rotate_right_button.pack(side=tk.RIGHT, padx=5)
+        self.rotate_right_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         def rotate_left_wrapper():
             self.update_status_display("Rotate Tool: Rotates image 90 degrees counter-clockwise | Shortcut: Ctrl+[ | Use Apply to All to rotate all images")
-            self.rotate_image(-90)
+            self.rotate_image(90)
         self.rotate_left_button = self.create_button_with_hint(
-            self.toolbar_frame,
+            rotation_buttons,
             self.rotate_left_icon,
             rotate_left_wrapper,
             "Rotate Counter-Clockwise\nRotate image 90° counter-clockwise\nShortcut: Ctrl+[",
             "Rotate Tool: Rotates image 90 degrees counter-clockwise | Shortcut: Ctrl+[ | Use Apply to All to rotate all images"
         )
-        self.rotate_left_button.pack(side=tk.RIGHT, padx=5)
+        self.rotate_left_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Label for Rotation
+        rotation_label = tk.Label(
+            rotation_section,
+            text="Rotation",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        rotation_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        
+        # Spacer to push navigation to the right
+        tk.Frame(self.toolbar_frame, width=20).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        
+        # Navigation section (right side, pressed against the right edge)
+        navigation_section = tk.Frame(self.toolbar_frame)
+        navigation_section.pack(side=tk.RIGHT, padx=(2, 2))
+        
+        navigation_buttons = tk.Frame(navigation_section)
+        navigation_buttons.pack(side=tk.TOP, pady=2)
+        
+        # Right side: Navigation buttons (order: start, back, counter, forward, end)
+        def start_wrapper():
+            self.update_status_display("Navigation Tool: Jump to first image in collection | Use arrow buttons or Left/Right arrow keys to navigate")
+            self.navigate_images(-2)
+        self.start_button = self.create_button_with_hint(
+            navigation_buttons,
+            self.start_icon,
+            start_wrapper,
+            "First Image\nGo to the first image",
+            "Navigation Tool: Jump to first image in collection | Use arrow buttons or Left/Right arrow keys to navigate"
+        )
+        self.start_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        def back_wrapper():
+            self.update_status_display("Navigation Tool: Move to previous image | Shortcut: Left Arrow | Counter shows current position (e.g., 3 / 10)")
+            self.navigate_images(-1)
+        self.back_button = self.create_button_with_hint(
+            navigation_buttons,
+            self.back_icon,
+            back_wrapper,
+            "Previous Image\nNavigate to previous image\nShortcut: Left Arrow",
+            "Navigation Tool: Move to previous image | Shortcut: Left Arrow | Counter shows current position (e.g., 3 / 10)"
+        )
+        self.back_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Counter between back and forward
+        self.counter_label = ttk.Label(
+            navigation_buttons,
+            text="0 / 0",
+            font=("Arial", 10),
+            padding=(5, 0)
+        )
+        self.counter_label.pack(side=tk.LEFT, padx=10)
+        
+        def forward_wrapper():
+            self.update_status_display("Navigation Tool: Move to next image | Shortcut: Right Arrow | Use First/Last buttons to jump to ends")
+            self.navigate_images(1)
+        self.forward_button = self.create_button_with_hint(
+            navigation_buttons,
+            self.forward_icon,
+            forward_wrapper,
+            "Next Image\nNavigate to next image\nShortcut: Right Arrow",
+            "Navigation Tool: Move to next image | Shortcut: Right Arrow | Use First/Last buttons to jump to ends"
+        )
+        self.forward_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        def end_wrapper():
+            self.update_status_display("Navigation Tool: Jump to last image in collection | Use arrow buttons or Left/Right arrow keys to navigate")
+            self.navigate_images(2)
+        self.end_button = self.create_button_with_hint(
+            navigation_buttons,
+            self.end_icon,
+            end_wrapper,
+            "Last Image\nGo to the last image",
+            "Navigation Tool: Jump to last image in collection | Use arrow buttons or Left/Right arrow keys to navigate"
+        )
+        self.end_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Label for Navigation
+        navigation_label = tk.Label(
+            navigation_section,
+            text="Navigation",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        navigation_label.pack(side=tk.BOTTOM, pady=(0, 2))
         
         # Main frame for canvas
         main_frame = tk.Frame(self)
@@ -496,7 +590,7 @@ class PearlEditApp(BaseTk):
         # Status label for showing button instructions
         self.status_label = tk.Label(
             self.bottom_frame,
-            text="Ready - Click any button to see instructions",
+            text="Ready | Zoom: CTRL + Mouse Wheel | Pan: Hold SPACEBAR + Drag Mouse",
             anchor=tk.W,
             justify=tk.LEFT,
             font=("Arial", 10),
@@ -571,13 +665,14 @@ class PearlEditApp(BaseTk):
         
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="New", command=self.reset_program)
+        file_menu.add_separator()
         file_menu.add_command(label="Open Folder...", command=self.open_folder, accelerator="Ctrl+O")
         file_menu.add_command(label="Import Images...", command=self.import_images, accelerator="Ctrl+I")
+        file_menu.add_command(label="Import PDF...", command=self.import_pdf)
         file_menu.add_separator()
         file_menu.add_command(label="Save", command=self.save_images, accelerator="Ctrl+S")
         file_menu.add_command(label="Save As...", command=self.save_images_as, accelerator="Ctrl+Shift+S")
-        file_menu.add_separator()
-        file_menu.add_command(label="Reset Program", command=self.reset_program)
         file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -702,8 +797,21 @@ class PearlEditApp(BaseTk):
         # Mouse and navigation
         self.image_canvas.bind("<Button-1>", self.handle_mouse_click)
         self.image_canvas.bind("<ButtonRelease-1>", self.handle_mouse_release)
+        self.image_canvas.bind("<B1-Motion>", self.handle_mouse_drag)
         self.bind("<Left>", lambda e: self.navigate_images(-1))
         self.bind("<Right>", lambda e: self.navigate_images(1))
+        
+        # Zoom and pan
+        # Mousewheel binding works differently on different platforms
+        # On Windows, use <MouseWheel>
+        # On Linux/Mac, use <Button-4> and <Button-5>
+        self.image_canvas.bind("<MouseWheel>", self.on_mousewheel)
+        self.image_canvas.bind("<Button-4>", self.on_mousewheel)  # Linux/Mac scroll up
+        self.image_canvas.bind("<Button-5>", self.on_mousewheel)  # Linux/Mac scroll down
+        self.bind("<KeyPress-space>", self.start_pan)
+        self.bind("<KeyRelease-space>", self.stop_pan)
+        # Focus on canvas for key bindings
+        self.image_canvas.focus_set()
         
         # Image rotation
         self.bind("<Control-bracketright>", lambda e: self.rotate_image(-90))
@@ -826,6 +934,9 @@ class PearlEditApp(BaseTk):
                 
                 if path.suffix.lower() in ('.jpg', '.jpeg'):
                     image_files.append(path)
+                elif path.suffix.lower() == '.pdf':
+                    # PDF files are handled by import_image_files
+                    image_files.append(path)
                 elif path.is_dir():
                     # If a directory is dropped, scan it for images
                     from ..repository import scan_images
@@ -836,7 +947,7 @@ class PearlEditApp(BaseTk):
                         logger.error(f"Error scanning directory {path}: {e}")
             
             if not image_files:
-                messagebox.showwarning("No Images", "No valid image files (.jpg, .jpeg) were found in the dropped items.")
+                messagebox.showwarning("No Images", "No valid image files (.jpg, .jpeg) or PDF files (.pdf) were found in the dropped items.")
                 return
             
             self.import_image_files(image_files)
@@ -916,6 +1027,22 @@ class PearlEditApp(BaseTk):
         if files:
             image_files = [Path(f) for f in files]
             self.import_image_files(image_files)
+    
+    def import_pdf(self):
+        """Open file dialog to import PDF and extract images."""
+        from tkinter import filedialog
+        
+        file = filedialog.askopenfilename(
+            title="Select PDF to Import",
+            filetypes=[
+                ("PDF files", "*.pdf"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file:
+            pdf_file = Path(file)
+            self.import_image_files([pdf_file])
     
     def import_image_files(self, image_files: list):
         """Import images from a list of file paths."""
@@ -1031,6 +1158,16 @@ class PearlEditApp(BaseTk):
             messagebox.showerror("Error", "Image file not found.")
             return
         
+        # Reset zoom and pan when showing a new image (if image changed)
+        if not hasattr(self, '_last_image_path') or self._last_image_path != image_path:
+            self.zoom_level = 1.0
+            self.pan_x = 0
+            self.pan_y = 0
+            self._last_image_path = image_path
+            self._cached_photo = None
+            self._cached_zoom = 1.0
+            self._image_item = None
+        
         try:
             with Image.open(image_path) as image:
                 self.original_image = image.copy()
@@ -1045,20 +1182,38 @@ class PearlEditApp(BaseTk):
                     self.after(100, self.show_current_image)
                     return
                 
+                # Calculate fit-to-window scale
                 scale_x = canvas_width / image_width
                 scale_y = canvas_height / image_height
                 self.current_scale = min(scale_x, scale_y)
                 
+                # Apply zoom level
+                actual_scale = self.current_scale * self.zoom_level
+                
                 # Resize for display
-                new_width = int(image_width * self.current_scale)
-                new_height = int(image_height * self.current_scale)
+                new_width = int(image_width * actual_scale)
+                new_height = int(image_height * actual_scale)
                 resized_image = self.original_image.resize((new_width, new_height), Image.LANCZOS)
                 
-                # Display
+                # Display with pan offset
                 photo = ImageTk.PhotoImage(resized_image)
                 self.image_canvas.delete("all")
                 self.image_canvas.image = photo
-                self.image_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+                
+                # Calculate position with pan offset
+                x_pos = self.pan_x
+                y_pos = self.pan_y
+                
+                # Center image if it's smaller than canvas
+                if new_width < canvas_width:
+                    x_pos = (canvas_width - new_width) // 2 + self.pan_x
+                if new_height < canvas_height:
+                    y_pos = (canvas_height - new_height) // 2 + self.pan_y
+                
+                # Store image item ID and cached photo
+                self._image_item = self.image_canvas.create_image(x_pos, y_pos, anchor=tk.NW, image=photo)
+                self._cached_photo = photo
+                self._cached_zoom = self.zoom_level
                 self.image_canvas.config(scrollregion=self.image_canvas.bbox("all"))
                 
                 # Redraw cursor if active
@@ -1326,7 +1481,9 @@ class PearlEditApp(BaseTk):
         return result['proceed']
     
     def clear_all_modes(self):
-        """Clear all active modes."""
+        """Clear all active modes and reset to default state."""
+        # Reset status to default zoom/pan info when nothing is selected
+        self.update_status_display("Ready | Zoom: CTRL + Mouse Wheel | Pan: Hold SPACEBAR + Drag Mouse")
         self.cropping = False
         self.crop_start = None
         self.crop_end = None
@@ -1391,6 +1548,190 @@ class PearlEditApp(BaseTk):
             self.crop_end = (self.image_canvas.canvasx(event.x), self.image_canvas.canvasy(event.y))
             if self.batch_process.get():
                 self.apply_crop()
+        elif self.panning:
+            self.panning = False
+    
+    def handle_mouse_drag(self, event):
+        """Handle mouse drag events."""
+        if self.panning:
+            # Calculate pan delta (mouse movement direction = image movement direction)
+            # Mouse right → image right (positive dx)
+            # Mouse up → image up
+            dx = event.x - self.pan_start_x
+            dy_raw = event.y - self.pan_start_y  # Raw mouse movement
+            
+            # Update pan offset (pan_y increases = image moves down in canvas)
+            self.pan_x += dx
+            self.pan_y += dy_raw  # pan_y tracks actual position
+            
+            # Update start position for next drag
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+            
+            # Smooth pan: move the image item (canvas.move uses screen coords)
+            # For canvas.move: positive dy moves DOWN, but we want mouse up = image up
+            # So we need to invert dy for canvas.move()
+            if self._image_item:
+                self.image_canvas.move(self._image_item, dx, -dy_raw)  # Invert Y for canvas.move
+            else:
+                # Fallback to full redraw if item not found
+                self.show_current_image()
+    
+    def on_mousewheel(self, event):
+        """Handle mouse wheel zoom with CTRL modifier."""
+        # Check if CTRL is pressed (0x4 = Control key)
+        # On some systems, we need to check event.state, on others we check the binding
+        ctrl_pressed = (event.state & 0x4) or (hasattr(event, 'state') and event.state & 0x0004)
+        
+        # For Linux/Mac, button numbers indicate scroll direction
+        if event.num == 4:  # Scroll up
+            delta = 1
+        elif event.num == 5:  # Scroll down
+            delta = -1
+        else:
+            # Windows mousewheel
+            delta = event.delta
+        
+        # Only zoom if CTRL is pressed
+        if not ctrl_pressed:
+            return
+        
+        if not self.original_image:
+            return
+        
+        # Determine zoom direction
+        if delta > 0:
+            zoom_factor = 1.1  # Zoom in
+        else:
+            zoom_factor = 0.9  # Zoom out
+        
+        # Calculate zoom around mouse position
+        canvas_width = self.image_canvas.winfo_width()
+        canvas_height = self.image_canvas.winfo_height()
+        
+        # Get mouse position relative to canvas
+        mouse_x = event.x
+        mouse_y = event.y
+        
+        # Get current image position
+        image_width = int(self.original_image.size[0] * self.current_scale * self.zoom_level)
+        image_height = int(self.original_image.size[1] * self.current_scale * self.zoom_level)
+        
+        # Calculate image position (accounting for centering)
+        if image_width < canvas_width:
+            image_x = (canvas_width - image_width) // 2 + self.pan_x
+        else:
+            image_x = self.pan_x
+        
+        if image_height < canvas_height:
+            image_y = (canvas_height - image_height) // 2 + self.pan_y
+        else:
+            image_y = self.pan_y
+        
+        # Calculate mouse position relative to image
+        mouse_rel_x = mouse_x - image_x
+        mouse_rel_y = mouse_y - image_y
+        
+        # Calculate mouse position in original image coordinates
+        if image_width > 0 and image_height > 0:
+            mouse_image_x = mouse_rel_x / (self.current_scale * self.zoom_level)
+            mouse_image_y = mouse_rel_y / (self.current_scale * self.zoom_level)
+        else:
+            mouse_image_x = 0
+            mouse_image_y = 0
+        
+        # Update zoom level
+        old_zoom = self.zoom_level
+        self.zoom_level *= zoom_factor
+        
+        # Limit zoom range
+        self.zoom_level = max(0.1, min(10.0, self.zoom_level))
+        
+        # If zoom changed significantly, adjust pan to keep mouse position stable
+        if abs(old_zoom - self.zoom_level) > 0.001:
+            # Calculate new image dimensions
+            new_image_width = int(self.original_image.size[0] * self.current_scale * self.zoom_level)
+            new_image_height = int(self.original_image.size[1] * self.current_scale * self.zoom_level)
+            
+            # Calculate new image position with centering
+            if new_image_width < canvas_width:
+                new_image_x = (canvas_width - new_image_width) // 2
+            else:
+                new_image_x = 0
+            
+            if new_image_height < canvas_height:
+                new_image_y = (canvas_height - new_image_height) // 2
+            else:
+                new_image_y = 0
+            
+            # Calculate new mouse position in image coordinates
+            new_mouse_image_x = mouse_image_x * self.current_scale * self.zoom_level
+            new_mouse_image_y = mouse_image_y * self.current_scale * self.zoom_level
+            
+            # Adjust pan to keep mouse position stable
+            self.pan_x = mouse_x - new_mouse_image_x - new_image_x
+            self.pan_y = mouse_y - new_mouse_image_y - new_image_y
+        
+        # Update display for zoom - regenerate image if needed
+        # Only regenerate if zoom changed significantly (1% threshold), otherwise just update position
+        if abs(self._cached_zoom - self.zoom_level) > 0.01 or self._cached_photo is None:
+            # Need to regenerate image at new zoom level
+            self.show_current_image()
+        else:
+            # Just update position for smooth incremental zoom
+            self._update_image_position()
+    
+    def _update_image_position(self):
+        """Update image position without redrawing."""
+        if not self._image_item or not self.original_image:
+            return
+        
+        canvas_width = self.image_canvas.winfo_width()
+        canvas_height = self.image_canvas.winfo_height()
+        image_width = int(self.original_image.size[0] * self.current_scale * self.zoom_level)
+        image_height = int(self.original_image.size[1] * self.current_scale * self.zoom_level)
+        
+        # Calculate position with pan offset
+        x_pos = self.pan_x
+        y_pos = self.pan_y
+        
+        # Center image if it's smaller than canvas
+        if image_width < canvas_width:
+            x_pos = (canvas_width - image_width) // 2 + self.pan_x
+        if image_height < canvas_height:
+            y_pos = (canvas_height - image_height) // 2 + self.pan_y
+        
+        # Get current position and update smoothly
+        current_pos = self.image_canvas.coords(self._image_item)
+        if current_pos:
+            # Move to new position
+            self.image_canvas.coords(self._image_item, x_pos, y_pos)
+    
+    def start_pan(self, event):
+        """Start panning mode when spacebar is pressed."""
+        if not self.original_image:
+            return
+        self.panning = True
+        self.image_canvas.config(cursor="hand2")
+        # Get initial mouse position relative to canvas
+        try:
+            self.pan_start_x = self.image_canvas.winfo_pointerx() - self.image_canvas.winfo_rootx()
+            self.pan_start_y = self.image_canvas.winfo_pointery() - self.image_canvas.winfo_rooty()
+        except:
+            # Fallback if pointer position unavailable
+            self.pan_start_x = 0
+            self.pan_start_y = 0
+    
+    def stop_pan(self, event):
+        """Stop panning mode when spacebar is released."""
+        self.panning = False
+        # Restore cursor based on current mode
+        if self.special_cursor_active:
+            self.image_canvas.config(cursor="none")
+        elif self.cropping:
+            self.image_canvas.config(cursor="crosshair")
+        else:
+            self.image_canvas.config(cursor="")
     
     def split_image(self, orientation: str, split_coord: int = None, line_coords: tuple = None):
         """Split current image or all images based on toggle."""
@@ -1883,8 +2224,8 @@ class PearlEditApp(BaseTk):
         # Ask for confirmation
         if self.service.state.images:
             response = messagebox.askyesno(
-                "Reset Program",
-                "Are you sure you want to reset the program?\n\n"
+                "New",
+                "Are you sure you want to start a new session?\n\n"
                 "This will clear all loaded images and reset the application to its initial state.\n"
                 "Unsaved changes will be lost."
             )
@@ -1962,7 +2303,7 @@ class PearlEditApp(BaseTk):
             
         except Exception as e:
             logger.error(f"Error during program reset: {e}")
-            messagebox.showerror("Error", f"Failed to reset program: {str(e)}")
+            messagebox.showerror("Error", f"Failed to start new session: {str(e)}")
     
     def on_closing(self):
         """Handle window closing."""

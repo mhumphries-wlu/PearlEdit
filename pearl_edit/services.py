@@ -11,7 +11,8 @@ from .image_ops import (
 )
 from .repository import (
     scan_images, copy_image, remove_image, backup_image,
-    restore_from_backup, generate_split_filename, RepositoryError
+    restore_from_backup, generate_split_filename, extract_images_from_pdf,
+    RepositoryError
 )
 from .state import SessionState, ImageRecord
 from .paths import TempManager, pass_images_for, PathError
@@ -74,34 +75,56 @@ class ImageService:
             if not temp_dir:
                 raise UserFacingError("Temp directory not available")
             
-            # Copy images to temp directory
+            # Process files (images and PDFs) to temp directory
             imported_count = 0
-            for img_file in image_files:
-                if not img_file.exists():
-                    logger.warning(f"Image file does not exist: {img_file}")
+            for file_path in image_files:
+                if not file_path.exists():
+                    logger.warning(f"File does not exist: {file_path}")
                     continue
                 
-                if img_file.suffix.lower() not in ('.jpg', '.jpeg'):
-                    logger.warning(f"Skipping non-image file: {img_file}")
+                # Handle PDF files
+                if file_path.suffix.lower() == '.pdf':
+                    try:
+                        # Extract images from PDF
+                        extracted_images = extract_images_from_pdf(file_path, temp_dir)
+                        
+                        # Copy extracted images to originals backup
+                        if self.temp_manager.originals_path and extracted_images:
+                            for extracted_img in extracted_images:
+                                orig_dst = self.temp_manager.originals_path / extracted_img.name
+                                copy_image(extracted_img, orig_dst)
+                        
+                        imported_count += len(extracted_images)
+                        logger.info(f"Extracted {len(extracted_images)} images from PDF {file_path.name}")
+                    except RepositoryError as e:
+                        logger.error(f"Error extracting PDF {file_path}: {e}")
+                        raise UserFacingError(f"Failed to extract images from PDF: {str(e)}") from e
+                    except Exception as e:
+                        logger.error(f"Unexpected error extracting PDF {file_path}: {e}")
+                        raise UserFacingError(f"Failed to extract images from PDF: {str(e)}") from e
+                
+                # Handle regular image files
+                elif file_path.suffix.lower() in ('.jpg', '.jpeg'):
+                    # Copy to temp directory
+                    dst = temp_dir / file_path.name
+                    # Handle name collisions
+                    counter = 1
+                    while dst.exists():
+                        stem = file_path.stem
+                        dst = temp_dir / f"{stem}_{counter}{file_path.suffix}"
+                        counter += 1
+                    
+                    copy_image(file_path, dst)
+                    
+                    # Also copy to originals backup
+                    if self.temp_manager.originals_path:
+                        orig_dst = self.temp_manager.originals_path / dst.name
+                        copy_image(file_path, orig_dst)
+                    
+                    imported_count += 1
+                else:
+                    logger.warning(f"Skipping unsupported file type: {file_path}")
                     continue
-                
-                # Copy to temp directory
-                dst = temp_dir / img_file.name
-                # Handle name collisions
-                counter = 1
-                while dst.exists():
-                    stem = img_file.stem
-                    dst = temp_dir / f"{stem}_{counter}{img_file.suffix}"
-                    counter += 1
-                
-                copy_image(img_file, dst)
-                
-                # Also copy to originals backup
-                if self.temp_manager.originals_path:
-                    orig_dst = self.temp_manager.originals_path / dst.name
-                    copy_image(img_file, orig_dst)
-                
-                imported_count += 1
             
             if imported_count == 0:
                 raise UserFacingError("No valid images to import")

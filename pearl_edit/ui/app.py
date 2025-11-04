@@ -1460,8 +1460,13 @@ class PearlEditApp(BaseTk):
                 self.show_current_image()
                 # Advance to next image if batch processing is enabled
                 if self.batch_process.get():
-                    self.after(100, lambda: self.navigate_images(1))
-                    self.after(200, self.auto_crop_current)
+                    # Check if we're not at the last image before navigating
+                    current_index = self.service.state.current_image_index
+                    total_images = len(self.service.state.images)
+                    if current_index < total_images - 1:
+                        # Navigate to next image and continue processing
+                        self.after(100, lambda: self.navigate_images(1))
+                        self.after(200, self.auto_crop_current)
             except UserFacingError as e:
                 messagebox.showerror("Error", str(e))
             except Exception as e:

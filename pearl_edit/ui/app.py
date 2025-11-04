@@ -179,8 +179,22 @@ class PearlEditApp(BaseTk):
     
     def setup_window(self):
         """Set up the main window."""
-        self.title("Transcription Pearl Image Preprocessing Tool 0.9 beta")
+        self.title("PearlEdit 1.0")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Set application icon
+        try:
+            project_root = Path(__file__).parent.parent.parent
+            icon_path = project_root / "util" / "icons" / "PearlEdit.png"
+            if icon_path.exists():
+                # Load icon at a reasonable size for window icon
+                app_icon = self.load_icon(icon_path, size=(64, 64))
+                self.iconphoto(True, app_icon)
+            else:
+                logger.warning(f"Application icon not found: {icon_path}")
+        except Exception as e:
+            logger.warning(f"Failed to set application icon: {e}")
+        
         # Set zoomed state after window is mapped
         self.after_idle(lambda: self.state('zoomed'))
     
@@ -390,19 +404,18 @@ class PearlEditApp(BaseTk):
         separator_processing = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
         separator_processing.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
         
-        # Image Editing section
-        image_editing_section = tk.Frame(self.toolbar_frame)
-        image_editing_section.pack(side=tk.LEFT, padx=2)
+        # Split section
+        split_section = tk.Frame(self.toolbar_frame)
+        split_section.pack(side=tk.LEFT, padx=2)
         
-        image_editing_buttons = tk.Frame(image_editing_section)
-        image_editing_buttons.pack(side=tk.TOP, pady=2)
+        split_buttons = tk.Frame(split_section)
+        split_buttons.pack(side=tk.TOP, pady=2)
         
-        # Left side: Split button with icon
         def split_wrapper():
             self.update_status_display("Split Tool: To change between Horizontal and Vertical Cursor use Ctrl+H and Ctrl+V | To rotate cursor use [ and ] | To split image, click mouse")
             self.switch_to_vertical()
         self.split_button = self.create_button_with_hint(
-            image_editing_buttons,
+            split_buttons,
             self.split_icon,
             split_wrapper,
             "Split Image\nActivate vertical split cursor\nClick to split at cursor position\nShortcuts: Ctrl+V (vertical), Ctrl+H (horizontal)",
@@ -410,12 +423,31 @@ class PearlEditApp(BaseTk):
         )
         self.split_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Left side: Crop button
+        # Label for Split
+        split_label = tk.Label(
+            split_section,
+            text="Split",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        split_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        
+        # Divider after Split
+        separator_split = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
+        separator_split.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        
+        # Crop section
+        crop_section = tk.Frame(self.toolbar_frame)
+        crop_section.pack(side=tk.LEFT, padx=2)
+        
+        crop_buttons = tk.Frame(crop_section)
+        crop_buttons.pack(side=tk.TOP, pady=2)
+        
         def crop_wrapper():
             self.update_status_display("Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape")
             self.activate_crop_tool()
         self.crop_button = self.create_button_with_hint(
-            image_editing_buttons,
+            crop_buttons,
             self.crop_icon,
             crop_wrapper,
             "Crop Tool\nActivate crop mode\nDrag to select area\nEnter to apply, Escape to cancel\nShortcut: Ctrl+Shift+C",
@@ -423,12 +455,11 @@ class PearlEditApp(BaseTk):
         )
         self.crop_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Left side: Auto-crop button
         def autocrop_wrapper():
             self.update_status_display("Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort")
             self.auto_crop_current()
         self.autocrop_button = self.create_button_with_hint(
-            image_editing_buttons,
+            crop_buttons,
             self.autocrop_icon,
             autocrop_wrapper,
             "Auto Crop\nAutomatically crop image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+A",
@@ -436,12 +467,31 @@ class PearlEditApp(BaseTk):
         )
         self.autocrop_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Left side: Straighten button
+        # Label for Crop
+        crop_label = tk.Label(
+            crop_section,
+            text="Crop",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        crop_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        
+        # Divider after Crop
+        separator_crop = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
+        separator_crop.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        
+        # Straighten section
+        straighten_section = tk.Frame(self.toolbar_frame)
+        straighten_section.pack(side=tk.LEFT, padx=2)
+        
+        straighten_buttons = tk.Frame(straighten_section)
+        straighten_buttons.pack(side=tk.TOP, pady=2)
+        
         def straighten_wrapper():
             self.update_status_display("Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line")
             self.manual_straighten()
         self.straighten_button = self.create_button_with_hint(
-            image_editing_buttons,
+            straighten_buttons,
             self.straighten_icon,
             straighten_wrapper,
             "Straighten Image\nDraw a line to straighten image\nClick start point, then end point\nShortcut: Ctrl+L",
@@ -449,12 +499,11 @@ class PearlEditApp(BaseTk):
         )
         self.straighten_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Left side: Auto-straighten button
         def autostraighten_wrapper():
             self.update_status_display("Auto Straighten Tool: Adjust threshold slider in dialog | Click Apply to straighten image | Click Cancel to abort")
             self.auto_straighten_current()
         self.autostraighten_button = self.create_button_with_hint(
-            image_editing_buttons,
+            straighten_buttons,
             self.autostraighten_icon,
             autostraighten_wrapper,
             "Auto Straighten\nAutomatically straighten image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+L",
@@ -462,18 +511,18 @@ class PearlEditApp(BaseTk):
         )
         self.autostraighten_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Label for Image Editing
-        image_editing_label = tk.Label(
-            image_editing_section,
-            text="Image Editing",
+        # Label for Straighten
+        straighten_label = tk.Label(
+            straighten_section,
+            text="Straighten",
             font=("Arial", 7),
             fg="gray"
         )
-        image_editing_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        straighten_label.pack(side=tk.BOTTOM, pady=(0, 2))
         
-        # Divider after Image Editing
-        separator_image_editing = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
-        separator_image_editing.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        # Divider after Straighten
+        separator_straighten = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
+        separator_straighten.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
         
         # Rotation section (left side, after Image Editing)
         rotation_section = tk.Frame(self.toolbar_frame)

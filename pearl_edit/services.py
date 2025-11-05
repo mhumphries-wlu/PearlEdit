@@ -912,6 +912,78 @@ class ImageService:
             logger.error(f"Error deleting image: {e}")
             raise UserFacingError(f"Error deleting image: {str(e)}") from e
     
+    def delete_range(self, indices: List[int]) -> int:
+        """
+        Delete multiple images by their indices.
+        
+        Args:
+            indices: List of image indices to delete (0-based, must be sorted in descending order)
+            
+        Returns:
+            Number of images deleted
+            
+        Raises:
+            UserFacingError: If operation fails
+        """
+        if not indices:
+            return 0
+        
+        if not self.state.images:
+            raise UserFacingError("No images to delete")
+        
+        # Update history manager temp_dir if needed
+        if self.temp_manager.path:
+            if self.history.temp_dir != self.temp_manager.path:
+                self.history.temp_dir = self.temp_manager.path
+                self.history.history_dir = self.temp_manager.path / "history"
+                self.history.history_dir.mkdir(exist_ok=True)
+        
+        try:
+            # Collect affected paths (check before deletion)
+            affected_paths = []
+            originals_to_delete = set()
+            
+            for idx in indices:
+                if 0 <= idx < len(self.state.images):
+                    record = self.state.images[idx]
+                    if record.split_image and record.split_image.exists():
+                        affected_paths.append(record.split_image)
+                    # Check if original is shared (before deletion)
+                    original_count = sum(1 for img in self.state.images if img.original_image == record.original_image)
+                    if original_count == 1:
+                        originals_to_delete.add(record.original_image)
+            
+            # Add originals to affected paths
+            affected_paths.extend(originals_to_delete)
+            
+            # Start history operation
+            op_id = self.history.start("delete_range", affected_paths, self.state)
+            
+            # Delete images (must be in descending order to maintain correct indices)
+            deleted_count = 0
+            for idx in sorted(indices, reverse=True):
+                if 0 <= idx < len(self.state.images):
+                    record = self.state.images[idx]
+                    
+                    # Remove split image if it exists
+                    if record.split_image and record.split_image.exists():
+                        remove_image(record.split_image)
+                    
+                    # Remove original if it's in the set
+                    if record.original_image in originals_to_delete:
+                        remove_image(record.original_image)
+                    
+                    # Remove from state
+                    self.state.remove_image(idx)
+                    deleted_count += 1
+            
+            self.history.commit(op_id)
+            self.state.mark_changed()
+            return deleted_count
+        except Exception as e:
+            logger.error(f"Error deleting images: {e}")
+            raise UserFacingError(f"Error deleting images: {str(e)}") from e
+    
     def revert_current(self) -> bool:
         """
         Revert current image to original.

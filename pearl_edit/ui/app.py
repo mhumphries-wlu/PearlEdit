@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from pathlib import Path
+from typing import Tuple
 import logging
 
 from PIL import Image, ImageTk
@@ -125,6 +126,8 @@ class PearlEditApp(BaseTk):
         self._cached_zoom = 1.0  # Zoom level of cached image
         self._image_item = None  # Canvas item ID for the image
         self._zoom_update_pending = False  # Throttle zoom updates
+        self.image_origin_x = 0  # X position of image on canvas (top-left)
+        self.image_origin_y = 0  # Y position of image on canvas (top-left)
         self.special_cursor_active = False
         self.cursor_orientation = 'vertical'
         self.cursor_angle = 0
@@ -280,6 +283,10 @@ class PearlEditApp(BaseTk):
         self.current_page_icon = self.load_icon(icons_dir / "current-page.png", size=(24, 24))
         self.all_pages_icon = self.load_icon(icons_dir / "all-pages.png", size=(24, 24))
         
+        # Delete icons
+        self.delete_icon = self.load_icon(icons_dir / "delete.png", size=(24, 24))
+        self.delete_multi_icon = self.load_icon(icons_dir / "delete-multi.png", size=(24, 24))
+        
         # Toolbar frame at the top
         self.toolbar_frame = tk.Frame(self, relief=tk.RAISED, borderwidth=1)
         self.toolbar_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
@@ -330,6 +337,31 @@ class PearlEditApp(BaseTk):
             "Save Tool: Saves all processed images to current directory | Shortcut: Ctrl+S | Use Save As (Ctrl+Shift+S) to choose location"
         )
         self.save_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Delete buttons in File Operations section
+        def delete_wrapper():
+            self.update_status_display("Delete Tool: Deletes the current image | Use Delete Range to delete multiple images")
+            self.delete_current()
+        self.delete_button = self.create_button_with_hint(
+            file_ops_buttons,
+            self.delete_icon,
+            delete_wrapper,
+            "Delete Image\nDelete the current image",
+            "Delete Tool: Deletes the current image | Use Delete Range to delete multiple images"
+        )
+        self.delete_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        def delete_range_wrapper():
+            self.update_status_display("Delete Range Tool: Opens dialog to delete multiple images | Select range and deletion mode")
+            self.delete_range_dialog()
+        self.delete_range_button = self.create_button_with_hint(
+            file_ops_buttons,
+            self.delete_multi_icon,
+            delete_range_wrapper,
+            "Delete Range\nDelete multiple images\nOpens selection dialog",
+            "Delete Range Tool: Opens dialog to delete multiple images | Select range and deletion mode"
+        )
+        self.delete_range_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Label for File Operations
         file_ops_label = tk.Label(
@@ -748,7 +780,7 @@ class PearlEditApp(BaseTk):
         edit_menu.add_command(label="Revert Current Image", command=self.revert_current)
         edit_menu.add_command(label="Revert All Images", command=self.revert_all)
         edit_menu.add_separator()
-        edit_menu.add_command(label="Delete Current Image", command=self.delete_current)
+        edit_menu.add_command(label="Delete Image", command=self.delete_current)
         menubar.add_cascade(label="Edit", menu=edit_menu)
         
         # View menu
@@ -1281,6 +1313,9 @@ class PearlEditApp(BaseTk):
                 self._image_item = self.image_canvas.create_image(x_pos, y_pos, anchor=tk.NW, image=photo)
                 self._cached_photo = photo
                 self._cached_zoom = self.zoom_level
+                # Store image origin for coordinate conversion
+                self.image_origin_x = x_pos
+                self.image_origin_y = y_pos
                 self.image_canvas.config(scrollregion=self.image_canvas.bbox("all"))
                 
                 # Redraw cursor if active
@@ -1293,6 +1328,48 @@ class PearlEditApp(BaseTk):
             logger.error(f"Error showing image: {e}")
             messagebox.showerror("Error", f"Failed to display image: {str(e)}")
             self.update_counter()  # Update counter even on error
+    
+    def canvas_to_image_coords(self, canvas_x: float, canvas_y: float) -> Tuple[int, int]:
+        """
+        Convert canvas coordinates to image pixel coordinates.
+        
+        Args:
+            canvas_x: X coordinate on canvas
+            canvas_y: Y coordinate on canvas
+            
+        Returns:
+            Tuple of (image_x, image_y) in image pixel coordinates, clamped to image bounds
+        """
+        if not self.original_image:
+            return (0, 0)
+        
+        # Calculate actual scale (accounting for zoom level)
+        actual_scale = self.current_scale * self.zoom_level
+        
+        # Get the image's position on the canvas (try bbox first, then fallback)
+        image_x = self.image_origin_x
+        image_y = self.image_origin_y
+        
+        if self._image_item:
+            image_bbox = self.image_canvas.bbox(self._image_item)
+            if image_bbox:
+                image_x = image_bbox[0]
+                image_y = image_bbox[1]
+        
+        # Convert canvas coordinates to image-relative coordinates
+        rel_x = canvas_x - image_x
+        rel_y = canvas_y - image_y
+        
+        # Convert to image coordinates (accounting for actual scale)
+        img_x = int(rel_x / actual_scale)
+        img_y = int(rel_y / actual_scale)
+        
+        # Clamp coordinates to image bounds
+        image_width, image_height = self.original_image.size
+        img_x = max(0, min(img_x, image_width - 1))
+        img_y = max(0, min(img_y, image_height - 1))
+        
+        return (img_x, img_y)
     
     def navigate_images(self, direction: int):
         """Navigate to a different image."""
@@ -2210,11 +2287,15 @@ class PearlEditApp(BaseTk):
         self.straighten_start = None
         
         def on_click(event):
+            # Use canvasx/canvasy to handle scrolling
+            canvas_x = self.image_canvas.canvasx(event.x)
+            canvas_y = self.image_canvas.canvasy(event.y)
+            
             if not self.straighten_start:
-                self.straighten_start = (event.x, event.y)
+                self.straighten_start = (canvas_x, canvas_y)
                 self.image_canvas.bind('<Motion>', update_guide_line)
             else:
-                end_point = (event.x, event.y)
+                end_point = (canvas_x, canvas_y)
                 calculate_and_rotate(self.straighten_start, end_point)
                 cleanup()
                 if self.batch_process.get():
@@ -2223,18 +2304,22 @@ class PearlEditApp(BaseTk):
         
         def update_guide_line(event):
             if self.straighten_start:
+                # Use canvasx/canvasy for guide line
+                canvas_x = self.image_canvas.canvasx(event.x)
+                canvas_y = self.image_canvas.canvasy(event.y)
+                
                 if self.guide_line:
                     self.image_canvas.delete(self.guide_line)
                 self.guide_line = self.image_canvas.create_line(
                     self.straighten_start[0], self.straighten_start[1],
-                    event.x, event.y,
+                    canvas_x, canvas_y,
                     fill='blue', width=2
                 )
         
         def calculate_and_rotate(start, end):
-            # Convert to image coordinates
-            start_img = (int(start[0] / self.current_scale), int(start[1] / self.current_scale))
-            end_img = (int(end[0] / self.current_scale), int(end[1] / self.current_scale))
+            # Convert canvas coordinates to image coordinates using robust helper
+            start_img = self.canvas_to_image_coords(start[0], start[1])
+            end_img = self.canvas_to_image_coords(end[0], end[1])
             
             if self.apply_to_all.get():
                 # Apply straighten to all images using batch API
@@ -2351,6 +2436,544 @@ class PearlEditApp(BaseTk):
             except UserFacingError as e:
                 messagebox.showerror("Error", str(e))
                 self.update_counter()  # Update counter even on error
+    
+    def delete_range_dialog(self):
+        """Open dialog to delete multiple images with range selection."""
+        if not self.service.state.images:
+            messagebox.showwarning("No Images", "No images to delete.")
+            return
+        
+        # Create dialog window
+        dialog = tk.Toplevel(self)
+        dialog.title("Delete Range")
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # Variables
+        deletion_mode = tk.StringVar(value="selected")
+        range_start = tk.StringVar(value="1")
+        range_end = tk.StringVar(value=str(len(self.service.state.images)))
+        selected_indices = set()
+        
+        # Thumbnail size - smaller for filmstrip
+        thumb_width = 100
+        thumb_height = 120
+        thumb_padding = 3
+        
+        # Main container with tighter padding
+        main_frame = tk.Frame(dialog, bg='#f0f0f0')
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Top controls section
+        controls_frame = tk.Frame(main_frame, bg='#f0f0f0')
+        controls_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Left side: Deletion mode radio buttons
+        mode_frame = tk.LabelFrame(controls_frame, text="Deletion Mode", relief=tk.GROOVE, bg='#f0f0f0', padx=10, pady=5)
+        mode_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        
+        def update_selection_display():
+            """Update visual selection display."""
+            # Update based on mode
+            mode = deletion_mode.get()
+            try:
+                start = max(1, int(range_start.get()))
+                end = min(len(self.service.state.images), int(range_end.get()))
+            except ValueError:
+                start = 1
+                end = len(self.service.state.images)
+            
+            # Determine which indices should be selected based on mode
+            if mode == "all":
+                indices_to_show = set(range(start - 1, end))
+            elif mode == "even":
+                indices_to_show = set(i for i in range(start - 1, end) if (i + 1) % 2 == 0)
+            elif mode == "odd":
+                indices_to_show = set(i for i in range(start - 1, end) if (i + 1) % 2 == 1)
+            else:  # selected
+                indices_to_show = selected_indices.copy()
+            
+            # Update frame colors
+            for i, frame in enumerate(thumbnail_widgets):
+                if i in indices_to_show:
+                    frame.config(bg="#4a90e2", relief=tk.SUNKEN, borderwidth=3)
+                    for child in frame.winfo_children():
+                        if isinstance(child, tk.Label) and hasattr(child, 'cget'):
+                            try:
+                                if child.cget('text').startswith('Page'):
+                                    child.config(fg="white", bg="#4a90e2")
+                            except:
+                                pass
+                    frame.selected = True
+                else:
+                    frame.config(bg="white", relief=tk.RAISED, borderwidth=1)
+                    for child in frame.winfo_children():
+                        if isinstance(child, tk.Label) and hasattr(child, 'cget'):
+                            try:
+                                if child.cget('text').startswith('Page'):
+                                    child.config(fg="black", bg="white")
+                            except:
+                                pass
+                    frame.selected = False
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="All images in range",
+            variable=deletion_mode,
+            value="all",
+            command=update_selection_display,
+            bg='#f0f0f0'
+        ).pack(anchor=tk.W, pady=2)
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Even Images",
+            variable=deletion_mode,
+            value="even",
+            command=update_selection_display,
+            bg='#f0f0f0'
+        ).pack(anchor=tk.W, pady=2)
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Odd Images",
+            variable=deletion_mode,
+            value="odd",
+            command=update_selection_display,
+            bg='#f0f0f0'
+        ).pack(anchor=tk.W, pady=2)
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Selected Images Only",
+            variable=deletion_mode,
+            value="selected",
+            command=update_selection_display,
+            bg='#f0f0f0'
+        ).pack(anchor=tk.W, pady=2)
+        
+        # Right side: Range input
+        range_frame = tk.LabelFrame(controls_frame, text="Page Range", relief=tk.GROOVE, bg='#f0f0f0', padx=10, pady=5)
+        range_frame.pack(side=tk.LEFT, fill=tk.Y)
+        
+        range_input_frame = tk.Frame(range_frame, bg='#f0f0f0')
+        range_input_frame.pack(pady=5)
+        
+        tk.Label(range_input_frame, text="From:", bg='#f0f0f0').grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        tk.Entry(range_input_frame, textvariable=range_start, width=8).grid(row=0, column=1, padx=2)
+        tk.Label(range_input_frame, text="To:", bg='#f0f0f0').grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tk.Entry(range_input_frame, textvariable=range_end, width=8).grid(row=1, column=1, padx=2, pady=(5, 0))
+        
+        def update_range():
+            try:
+                start = int(range_start.get())
+                end = int(range_end.get())
+                if start < 1:
+                    range_start.set("1")
+                if end > len(self.service.state.images):
+                    range_end.set(str(len(self.service.state.images)))
+                update_selection_display()
+            except ValueError:
+                pass
+        
+        range_start.trace('w', lambda *args: update_range())
+        range_end.trace('w', lambda *args: update_range())
+        
+        # Filmstrip section with better layout
+        filmstrip_container = tk.LabelFrame(main_frame, text="Image Selection", relief=tk.GROOVE, bg='#f0f0f0')
+        filmstrip_container.pack(fill=tk.X, pady=(0, 10))  # Changed from BOTH/expand to X only
+        
+        # Canvas for thumbnails with proper height
+        filmstrip_canvas = tk.Canvas(
+            filmstrip_container, 
+            bg="white", 
+            highlightthickness=1, 
+            highlightbackground="#cccccc",
+            height=thumb_height + 30  # Fixed height for thumbnails
+        )
+        filmstrip_canvas.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(5, 0))
+        
+        # Horizontal scrollbar positioned below canvas
+        scrollbar = ttk.Scrollbar(filmstrip_container, orient=tk.HORIZONTAL, command=filmstrip_canvas.xview)
+        scrollbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 5))
+        filmstrip_canvas.configure(xscrollcommand=scrollbar.set)
+        
+        # Inner frame for thumbnails
+        thumbnails_frame = tk.Frame(filmstrip_canvas, bg="white")
+        filmstrip_canvas_window = filmstrip_canvas.create_window((0, 0), window=thumbnails_frame, anchor=tk.NW)
+        
+        def configure_scroll_region(event=None):
+            # Update scroll region when content changes
+            filmstrip_canvas.update_idletasks()
+            dialog.update_idletasks()
+            
+            # Get the actual width of the thumbnails frame (which contains all thumbnails)
+            thumbnails_width = thumbnails_frame.winfo_reqwidth()
+            thumbnails_height = thumbnails_frame.winfo_reqheight()
+            
+            # If reqwidth is 1 (not yet rendered), calculate from children
+            if thumbnails_width <= 1 and len(thumbnail_widgets) > 0:
+                # Calculate width from last thumbnail position
+                last_container = thumbnails_frame.winfo_children()[-1] if thumbnails_frame.winfo_children() else None
+                if last_container:
+                    thumbnails_width = last_container.winfo_x() + last_container.winfo_reqwidth() + thumb_padding
+            
+            canvas_width = filmstrip_canvas.winfo_width()
+            canvas_height = filmstrip_canvas.winfo_height()
+            
+            # Ensure we have a valid width
+            if thumbnails_width <= 1:
+                # Calculate approximate width based on thumbnail count
+                thumbnails_width = len(thumbnail_widgets) * (thumb_width + thumb_padding * 2 + 10)
+            
+            # Set scroll region to encompass all thumbnails
+            # Use the greater of thumbnails width or canvas width
+            scroll_width = max(thumbnails_width, canvas_width, 1)
+            scroll_height = max(thumbnails_height, canvas_height, 1)
+            
+            filmstrip_canvas.configure(scrollregion=(0, 0, scroll_width, scroll_height))
+            
+            # Don't constrain the canvas window width - let it expand to fit all thumbnails
+            # This allows horizontal scrolling
+            if thumbnails_width > 1:
+                filmstrip_canvas.itemconfig(filmstrip_canvas_window, width=thumbnails_width)
+            
+            # Update scrollbar
+            filmstrip_canvas.update_idletasks()
+        
+        def on_canvas_configure(event):
+            # When canvas resizes, update scroll region but don't constrain thumbnails width
+            configure_scroll_region()
+        
+        thumbnails_frame.bind('<Configure>', configure_scroll_region)
+        filmstrip_canvas.bind('<Configure>', on_canvas_configure)
+        
+        # Add mouse wheel support for scrolling
+        def on_mousewheel(event):
+            # Scroll horizontally with mouse wheel
+            if event.delta:
+                filmstrip_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+            else:
+                # For Linux
+                if event.num == 4:
+                    filmstrip_canvas.xview_scroll(-1, "units")
+                elif event.num == 5:
+                    filmstrip_canvas.xview_scroll(1, "units")
+        
+        filmstrip_canvas.bind("<MouseWheel>", on_mousewheel)
+        filmstrip_canvas.bind("<Button-4>", on_mousewheel)
+        filmstrip_canvas.bind("<Button-5>", on_mousewheel)
+        
+        # Store thumbnail references
+        thumbnail_widgets = []
+        thumbnail_photos = []
+        
+        def load_thumbnails():
+            """Load all thumbnails."""
+            nonlocal thumbnail_widgets, thumbnail_photos
+            
+            # Clear existing
+            for widget in thumbnail_widgets:
+                widget.destroy()
+            thumbnail_widgets.clear()
+            thumbnail_photos.clear()
+            
+            # Load thumbnails with proper spacing
+            for i, record in enumerate(self.service.state.images):
+                # Container frame for each thumbnail
+                container = tk.Frame(thumbnails_frame, bg="white", padx=2, pady=5)
+                container.grid(row=0, column=i, padx=thumb_padding, sticky=tk.N)
+                
+                # Thumbnail frame with border
+                frame = tk.Frame(container, relief=tk.RAISED, borderwidth=1, bg="white")
+                frame.pack()
+                
+                # Load and resize image
+                try:
+                    image_path = record.current_image_path
+                    if not image_path.exists():
+                        raise FileNotFoundError(f"Image not found: {image_path}")
+                    
+                    with Image.open(image_path) as img:
+                        # Convert to RGB if necessary
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        # Calculate aspect ratio preserving resize for thumbnail
+                        # Use smaller size for thumbnails
+                        max_thumb_width = thumb_width
+                        max_thumb_height = thumb_height - 25  # Leave space for label
+                        
+                        img_ratio = img.width / img.height
+                        if img_ratio > max_thumb_width / max_thumb_height:
+                            # Image is wider than tall
+                            new_width = max_thumb_width
+                            new_height = int(max_thumb_width / img_ratio)
+                        else:
+                            # Image is taller than wide
+                            new_height = max_thumb_height
+                            new_width = int(max_thumb_height * img_ratio)
+                        
+                        # Resize the image
+                        img_thumb = img.resize((new_width, new_height), Image.LANCZOS)
+                        
+                        # Create padded thumbnail with white background
+                        padded_thumb = Image.new('RGB', (max_thumb_width, max_thumb_height), 'white')
+                        x_offset = (max_thumb_width - new_width) // 2
+                        y_offset = (max_thumb_height - new_height) // 2
+                        padded_thumb.paste(img_thumb, (x_offset, y_offset))
+                        
+                        # Convert to PhotoImage
+                        photo = ImageTk.PhotoImage(padded_thumb)
+                        thumbnail_photos.append(photo)  # Keep reference to prevent garbage collection
+                        
+                        # Create image label
+                        label = tk.Label(frame, image=photo, bg="white", borderwidth=0)
+                        label.image = photo  # Keep reference
+                        label.pack(pady=2)
+                        
+                        # Page number label
+                        page_label = tk.Label(
+                            frame, 
+                            text=f"Page {i+1}", 
+                            bg="white", 
+                            font=("Arial", 8, "bold"),
+                            pady=2
+                        )
+                        page_label.pack()
+                        
+                        # Store frame and index
+                        frame.image_index = i
+                        frame.selected = False
+                        thumbnail_widgets.append(frame)
+                        
+                        # Bind click events
+                        def make_click_handler(idx):
+                            def handler(event):
+                                # Handle CTRL and SHIFT
+                                if event.state & 0x0004:  # CTRL
+                                    if idx in selected_indices:
+                                        selected_indices.discard(idx)
+                                    else:
+                                        selected_indices.add(idx)
+                                elif event.state & 0x0001:  # SHIFT
+                                    if selected_indices:
+                                        start_idx = min(selected_indices)
+                                        end_idx = max(selected_indices)
+                                        if idx < start_idx:
+                                            selected_indices.update(range(idx, start_idx + 1))
+                                        elif idx > end_idx:
+                                            selected_indices.update(range(end_idx, idx + 1))
+                                    else:
+                                        selected_indices.add(idx)
+                                else:
+                                    selected_indices.clear()
+                                    selected_indices.add(idx)
+                                update_selection_display()
+                            return handler
+                        
+                        frame.bind("<Button-1>", make_click_handler(i))
+                        label.bind("<Button-1>", make_click_handler(i))
+                        page_label.bind("<Button-1>", make_click_handler(i))
+                        container.bind("<Button-1>", make_click_handler(i))
+                        
+                except Exception as e:
+                    logger.error(f"Error loading thumbnail {i}: {e}")
+                    # Create placeholder
+                    placeholder = tk.Label(
+                        frame, 
+                        text=f"Page {i+1}\n\n⚠\nError", 
+                        bg="#e0e0e0", 
+                        width=thumb_width//10, 
+                        height=thumb_height//20,
+                        font=("Arial", 9)
+                    )
+                    placeholder.pack(fill=tk.BOTH, expand=True)
+                    frame.image_index = i
+                    frame.selected = False
+                    thumbnail_widgets.append(frame)
+        
+        # Selection info label
+        info_frame = tk.Frame(main_frame, bg='#f0f0f0')
+        info_frame.pack(fill=tk.X, pady=(5, 5))
+        
+        selection_label = tk.Label(
+            info_frame,
+            text="Tip: Use Ctrl+Click to toggle selection, Shift+Click to select range",
+            bg='#f0f0f0',
+            font=("Arial", 9),
+            fg="#666666"
+        )
+        selection_label.pack(side=tk.LEFT)
+        
+        # Buttons frame - pack normally in sequence
+        button_frame = tk.Frame(main_frame, bg='#f0f0f0')
+        button_frame.pack(fill=tk.X, pady=(10, 5))
+        
+        # Initial load - after all UI elements are created
+        load_thumbnails()
+        update_selection_display()
+        
+        # Force update of scroll region after loading all thumbnails
+        # Use multiple updates to ensure all widgets are rendered
+        dialog.update_idletasks()
+        dialog.update()
+        
+        # Schedule scroll region update after a short delay to ensure all thumbnails are rendered
+        def delayed_scroll_update():
+            configure_scroll_region()
+            # Double-check after another short delay
+            dialog.after(50, configure_scroll_region)
+        
+        dialog.after(100, delayed_scroll_update)
+        
+        def delete_selected():
+            """Delete selected images."""
+            mode = deletion_mode.get()
+            try:
+                start = max(1, int(range_start.get()))
+                end = min(len(self.service.state.images), int(range_end.get()))
+            except ValueError:
+                messagebox.showerror("Error", "Invalid page range.", parent=dialog)
+                return
+            
+            # Determine indices to delete
+            if mode == "all":
+                indices = list(range(start - 1, end))
+            elif mode == "even":
+                indices = [i for i in range(start - 1, end) if (i + 1) % 2 == 0]
+            elif mode == "odd":
+                indices = [i for i in range(start - 1, end) if (i + 1) % 2 == 1]
+            else:  # selected
+                indices = list(selected_indices)
+            
+            if not indices:
+                messagebox.showwarning("No Selection", "No images selected for deletion.", parent=dialog)
+                return
+            
+            # Confirm deletion
+            count = len(indices)
+            pages_str = "pages" if count > 1 else "page"
+            if not messagebox.askyesno(
+                "Confirm Deletion", 
+                f"Are you sure you want to delete {count} {pages_str}?\n\nThis action cannot be undone.", 
+                parent=dialog
+            ):
+                return
+            
+            # Delete
+            try:
+                deleted_count = self.service.delete_range(indices)
+                dialog.destroy()
+                self.show_current_image()
+                self.update_counter()
+                messagebox.showinfo("Success", f"Successfully deleted {deleted_count} image(s).", parent=self)
+            except UserFacingError as e:
+                messagebox.showerror("Error", str(e), parent=dialog)
+        
+        def cancel():
+            dialog.destroy()
+        
+        # Style buttons to match main UI
+        delete_btn = tk.Button(
+            button_frame, 
+            text="Delete Selected", 
+            command=delete_selected,
+            bg="#d9534f",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            cursor="hand2"
+        )
+        delete_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        cancel_btn = tk.Button(
+            button_frame,
+            text="Cancel",
+            command=cancel,
+            bg="#6c757d",
+            fg="white",
+            font=("Arial", 10),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            cursor="hand2"
+        )
+        cancel_btn.pack(side=tk.RIGHT)
+        
+        # Count label
+        def update_count_label():
+            mode = deletion_mode.get()
+            try:
+                start = max(1, int(range_start.get()))
+                end = min(len(self.service.state.images), int(range_end.get()))
+            except ValueError:
+                start = 1
+                end = len(self.service.state.images)
+            
+            if mode == "all":
+                count = end - start + 1
+            elif mode == "even":
+                count = len([i for i in range(start - 1, end) if (i + 1) % 2 == 0])
+            elif mode == "odd":
+                count = len([i for i in range(start - 1, end) if (i + 1) % 2 == 1])
+            else:
+                count = len(selected_indices)
+            
+            count_label.config(text=f"{count} image(s) selected for deletion")
+        
+        count_label = tk.Label(
+            button_frame,
+            text="0 image(s) selected for deletion",
+            bg='#f0f0f0',
+            font=("Arial", 9, "bold"),
+            fg="#333333"
+        )
+        count_label.pack(side=tk.LEFT)
+        
+        # Update count when selection changes
+        original_update = update_selection_display
+        def new_update():
+            original_update()
+            update_count_label()
+        update_selection_display = new_update
+        
+        # Initial count
+        update_count_label()
+        
+        # Set initial size and position - ensure buttons are visible
+        # Wait for all content to load first
+        dialog.update_idletasks()
+        dialog.update()
+        
+        # Calculate required height after all content is loaded
+        required_height = (
+            controls_frame.winfo_reqheight() +
+            filmstrip_container.winfo_reqheight() +
+            info_frame.winfo_reqheight() +
+            button_frame.winfo_reqheight() +
+            60  # padding for margins
+        )
+        
+        # Ensure minimum height
+        final_height = max(520, required_height)
+        
+        # Set geometry
+        dialog.geometry(f"900x{final_height}")
+        dialog.update_idletasks()
+        
+        # Center dialog
+        x = (dialog.winfo_screenwidth() // 2) - 450
+        y = (dialog.winfo_screenheight() // 2) - (final_height // 2)
+        dialog.geometry(f"900x{final_height}+{x}+{y}")
+        
+        # Make dialog resizable
+        dialog.resizable(True, True)
+        
+        # Set minimum size to ensure buttons are always visible
+        dialog.minsize(700, 520)
     
     def revert_current(self):
         """Revert current image to original."""

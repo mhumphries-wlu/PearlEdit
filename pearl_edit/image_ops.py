@@ -330,10 +330,13 @@ def straighten_by_line(
     """
     Straighten image by rotating based on line drawn between two points.
     
+    Rotates the image so the drawn line aligns to the nearest axis (0° or 90°)
+    using the smallest rotation angle.
+    
     Args:
         image_path: Path to the image file
-        start_point: Tuple of (x, y) start point
-        end_point: Tuple of (x, y) end point
+        start_point: Tuple of (x, y) start point in image coordinates
+        end_point: Tuple of (x, y) end point in image coordinates
         
     Returns:
         True if successful
@@ -344,36 +347,47 @@ def straighten_by_line(
     try:
         import math
         
-        # Calculate angle between points
-        dx = end_point[0] - start_point[0]
-        dy = end_point[1] - start_point[1]
-        angle = math.degrees(math.atan2(dy, dx))
+        start_x, start_y = start_point
+        end_x, end_y = end_point
         
-        # Determine if line is more vertical or horizontal
-        is_vertical = abs(dx) < abs(dy)
+        dx = end_x - start_x
+        dy = end_y - start_y
         
-        if is_vertical:
-            # For vertical lines, normalize angle to be relative to 90°
-            target_angle = 90
-            current_angle = angle % 180
-            if current_angle < 0:
-                current_angle += 180
+        # Check for very short lines (less than 2 pixels)
+        line_length = math.sqrt(dx * dx + dy * dy)
+        if line_length < 2.0:
+            logger.warning(f"Line too short to determine orientation (length: {line_length:.2f})")
+            return False
+        
+        # Calculate angle in degrees, normalized to [-90°, 90°]
+        phi = math.degrees(math.atan2(dy, dx))
+        while phi <= -90:
+            phi += 180
+        while phi > 90:
+            phi -= 180
+        
+        # Calculate two candidate rotations (screen coords, y-down):
+        # After rotating CCW by theta, the screen angle becomes phi' = phi - theta.
+        # To align to target T, choose theta = phi - T.
+        
+        # 1. Rotate to horizontal (T = 0°)
+        delta_h = phi  # theta = phi - 0
+        
+        # 2. Rotate to vertical (T = +90° or -90°, whichever closer)
+        target_v = 90 if abs(phi - 90) <= abs(phi + 90) else -90
+        delta_v = phi - target_v
+        
+        # Choose the rotation with smaller absolute value
+        # On ties (exactly 45°), prefer horizontal (0°)
+        if abs(delta_h) <= abs(delta_v):
+            rotation_needed = delta_h
         else:
-            # For horizontal lines, normalize angle to be relative to 0°
-            target_angle = 0
-            current_angle = angle % 180
-            if current_angle < 0:
-                current_angle += 180
+            rotation_needed = delta_v
         
-        # Calculate the minimum rotation needed
-        rotation_needed = target_angle - current_angle
-        
-        # Normalize rotation to smallest angle
-        if abs(rotation_needed) > 90:
-            if rotation_needed > 0:
-                rotation_needed -= 180
-            else:
-                rotation_needed += 180
+        # Add deadzone to avoid micro-rotations on already-straight images
+        if abs(rotation_needed) < 0.25:
+            logger.info(f"Image already straight (detected angle: {phi:.2f}°, rotation: {rotation_needed:.2f}°)")
+            return True
         
         # Rotate the image
         return rotate_image(image_path, rotation_needed)
@@ -481,40 +495,23 @@ def auto_straighten(image_path: str, threshold: int = 127) -> bool:
         _, (w, h), theta = rect
         
         # Theta is in [-90, 0) range (negative = clockwise from horizontal)
-        # We want to determine if the longest side is closer to horizontal or vertical
-        # and rotate accordingly to 0° (horizontal) or 90° (vertical)
+        # To straighten, we need to rotate counter-clockwise (positive direction)
+        # If |theta| <= 45°, rotate toward horizontal (0°): rotation = -theta
+        # If |theta| > 45°, rotate toward vertical (90°): rotation = 90 - |theta|
         
-        # Convert theta to a positive angle in [0, 90) for easier logic
-        # If theta is -30°, the side is rotated 30° clockwise from horizontal
-        # We want to rotate it back 30° counter-clockwise to make it horizontal
         abs_theta = abs(theta)  # Angle in [0, 90) range
         
-        # Determine target orientation: if angle < 45°, rotate to horizontal (0°)
-        # If angle >= 45°, rotate to vertical (90°)
         if abs_theta <= 45:
             # Closer to horizontal, rotate to 0°
-            # Rotation needed is counter-clockwise by abs_theta degrees
-            rotation_needed = abs_theta
+            # Theta is negative (e.g., -30°), so -theta gives positive rotation (counter-clockwise)
+            rotation_needed = -theta
         else:
             # Closer to vertical (45° to 90°), rotate to 90°
-            # We need to rotate by (90 - abs_theta) degrees counter-clockwise
-            # But we also need to account for the direction
-            # If theta is -60°, abs_theta = 60°, we need to rotate 30° counter-clockwise
+            # Rotate counter-clockwise by (90 - abs_theta) degrees
             rotation_needed = 90 - abs_theta
         
-        # The rotation direction: counter-clockwise (positive) to straighten
-        # Since theta is negative (clockwise), we rotate positive (counter-clockwise)
-        # So rotation_needed is already positive and correct
-        
-        # Normalize rotation to smallest angle (mirror straighten_by_line logic)
-        if abs(rotation_needed) > 90:
-            if rotation_needed > 0:
-                rotation_needed -= 180
-            else:
-                rotation_needed += 180
-        
-        # Only rotate if significant correction is needed (avoid micro-rotations)
-        if abs(rotation_needed) < 0.5:
+        # Add deadzone to avoid micro-rotations on already-straight images
+        if abs(rotation_needed) < 0.25:
             logger.info(f"Image already straight (detected angle: {abs_theta:.2f}°)")
             return True
         

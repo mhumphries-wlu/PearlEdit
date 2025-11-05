@@ -40,7 +40,11 @@ originals_backup/
 *.png
 *.bmp
 *.gif
-!util/icons/
+!util/icons/**/*.png
+!util/icons/**/*.jpg
+!util/icons/**/*.jpeg
+!util/icons/**/*.bmp
+!util/icons/**/*.gif
 
 # OS
 .DS_Store

@@ -172,3 +172,5 @@ def pass_images_for(input_dir: Path) -> Path:
         logger.error(f"Error ensuring pass_images directory: {e}")
         raise PathError(f"Error ensuring pass_images directory: {str(e)}") from e
 
+
+

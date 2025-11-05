@@ -45,3 +45,5 @@ def setup_logging(verbose: bool = False, log_file: Path = None) -> None:
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
 
+
+

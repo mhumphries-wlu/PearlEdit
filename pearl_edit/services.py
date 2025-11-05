@@ -400,7 +400,12 @@ class ImageService:
                 elif orientation == 'angled':
                     if line_coords is None:
                         raise UserFacingError("Line coordinates required for angled split")
-                    base_orient = 'vertical' if angle and angle < 45 else 'horizontal'
+                    # Calculate orientation from line coordinates
+                    x1, y1, x2, y2 = line_coords
+                    dx = abs(x2 - x1)
+                    dy = abs(y2 - y1)
+                    # If line is more horizontal than vertical, use horizontal orientation
+                    base_orient = 'horizontal' if dy < dx else 'vertical'
                     left_img, right_img = split_image_angled(image, line_coords, base_orient)
                 else:
                     raise UserFacingError(f"Invalid orientation: {orientation}")

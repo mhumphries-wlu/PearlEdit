@@ -221,7 +221,14 @@ def generate_split_filename(base_path: Path, split_index: int, is_right: bool = 
     base_name = base_path.stem
     # Handle format like "0001_p001" or just "0001"
     if '_p' in base_name:
-        current_seq = int(base_name.split('_p')[0])
+        try:
+            current_seq = int(base_name.split('_p')[0])
+        except ValueError:
+            # If the part before '_p' isn't numeric, try extracting digits
+            try:
+                current_seq = int(''.join(filter(str.isdigit, base_name)))
+            except ValueError:
+                current_seq = split_index
     else:
         try:
             current_seq = int(''.join(filter(str.isdigit, base_name)))
@@ -243,7 +250,11 @@ def generate_split_filename(base_path: Path, split_index: int, is_right: bool = 
                     try:
                         fname_stem = fname.stem
                         if '_p' in fname_stem:
-                            num = int(fname_stem.split('_p')[0])
+                            try:
+                                num = int(fname_stem.split('_p')[0])
+                            except ValueError:
+                                # If the part before '_p' isn't numeric, try extracting digits
+                                num = int(''.join(filter(str.isdigit, fname_stem)))
                         else:
                             num = int(''.join(filter(str.isdigit, fname_stem)))
                         existing_numbers.append(num)

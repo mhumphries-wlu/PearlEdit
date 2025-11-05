@@ -1583,22 +1583,70 @@ class PearlEditApp(BaseTk):
         """Handle mouse click events."""
         if self.special_cursor_active and self.original_image:
             try:
+                # Calculate actual scale (accounting for zoom level)
+                actual_scale = self.current_scale * self.zoom_level
+                
+                # Get the image's position on the canvas
+                image_x = None
+                image_y = None
+                if self._image_item:
+                    image_bbox = self.image_canvas.bbox(self._image_item)
+                    if image_bbox:
+                        image_x = image_bbox[0]
+                        image_y = image_bbox[1]
+                
+                # Fallback: calculate position manually if bbox not available
+                if image_x is None or image_y is None:
+                    canvas_width = self.image_canvas.winfo_width()
+                    canvas_height = self.image_canvas.winfo_height()
+                    image_width = int(self.original_image.size[0] * actual_scale)
+                    image_height = int(self.original_image.size[1] * actual_scale)
+                    image_x = self.pan_x
+                    image_y = self.pan_y
+                    if image_width < canvas_width:
+                        image_x = (canvas_width - image_width) // 2 + self.pan_x
+                    if image_height < canvas_height:
+                        image_y = (canvas_height - image_height) // 2 + self.pan_y
+                
                 # Split image based on cursor position
                 if self.cursor_orientation == 'vertical' and self.vertical_line:
                     coords = self.image_canvas.coords(self.vertical_line)
                     if coords:
-                        split_x = int(coords[0] / self.current_scale)
+                        # Convert canvas coordinate to image-relative, then to image coordinate
+                        canvas_x = coords[0]
+                        rel_x = canvas_x - image_x
+                        split_x = int(rel_x / actual_scale)
+                        # Clamp to image bounds
+                        image_width, image_height = self.original_image.size
+                        split_x = max(0, min(split_x, image_width))
                         self.split_image('vertical', split_coord=split_x)
                 elif self.cursor_orientation == 'horizontal' and self.horizontal_line:
                     coords = self.image_canvas.coords(self.horizontal_line)
                     if coords:
-                        split_y = int(coords[1] / self.current_scale)
+                        # Convert canvas coordinate to image-relative, then to image coordinate
+                        canvas_y = coords[1]
+                        rel_y = canvas_y - image_y
+                        split_y = int(rel_y / actual_scale)
+                        # Clamp to image bounds
+                        image_width, image_height = self.original_image.size
+                        split_y = max(0, min(split_y, image_height))
                         self.split_image('horizontal', split_coord=split_y)
                 elif self.cursor_orientation == 'angled' and self.cursor_line:
                     coords = self.image_canvas.coords(self.cursor_line)
                     if coords:
-                        x1, y1, x2, y2 = [int(c / self.current_scale) for c in coords]
-                        self.split_image('angled', line_coords=(x1, y1, x2, y2))
+                        # Convert canvas coordinates to image-relative, then to image coordinates
+                        canvas_x1, canvas_y1, canvas_x2, canvas_y2 = coords
+                        rel_x1 = canvas_x1 - image_x
+                        rel_y1 = canvas_y1 - image_y
+                        rel_x2 = canvas_x2 - image_x
+                        rel_y2 = canvas_y2 - image_y
+                        x1 = rel_x1 / actual_scale
+                        y1 = rel_y1 / actual_scale
+                        x2 = rel_x2 / actual_scale
+                        y2 = rel_y2 / actual_scale
+                        # Don't clamp here - let split function find proper intersections with image boundaries
+                        # This preserves the exact angle of the cursor line
+                        self.split_image('angled', line_coords=(x1, y1, x2, y2), angle=self.cursor_angle)
                 
                 self.clear_cursor_lines()
                 
@@ -1623,7 +1671,7 @@ class PearlEditApp(BaseTk):
         if self.panning:
             # Calculate pan delta (mouse movement direction = image movement direction)
             # Mouse right → image right (positive dx)
-            # Mouse up → image up
+            # Mouse down → image down
             dx = event.x - self.pan_start_x
             dy_raw = event.y - self.pan_start_y  # Raw mouse movement
             
@@ -1636,10 +1684,8 @@ class PearlEditApp(BaseTk):
             self.pan_start_y = event.y
             
             # Smooth pan: move the image item (canvas.move uses screen coords)
-            # For canvas.move: positive dy moves DOWN, but we want mouse up = image up
-            # So we need to invert dy for canvas.move()
             if self._image_item:
-                self.image_canvas.move(self._image_item, dx, -dy_raw)  # Invert Y for canvas.move
+                self.image_canvas.move(self._image_item, dx, dy_raw)
             else:
                 # Fallback to full redraw if item not found
                 self.show_current_image()
@@ -1800,7 +1846,7 @@ class PearlEditApp(BaseTk):
         else:
             self.image_canvas.config(cursor="")
     
-    def split_image(self, orientation: str, split_coord: int = None, line_coords: tuple = None):
+    def split_image(self, orientation: str, split_coord: int = None, line_coords: tuple = None, angle: float = None):
         """Split current image or all images based on toggle."""
         if self.apply_to_all.get():
             # Show warning if not suppressed
@@ -1809,7 +1855,7 @@ class PearlEditApp(BaseTk):
             # Use batch split API
             try:
                 initial_index = self.service.state.current_image_index
-                self.service.split_all(orientation, split_coord, line_coords)
+                self.service.split_all(orientation, split_coord, line_coords, angle)
                 
                 # Find the left split of the originally selected image
                 restored_index = None
@@ -1834,7 +1880,7 @@ class PearlEditApp(BaseTk):
         else:
             # Split current image only
             try:
-                self.service.split_current(orientation, split_coord, line_coords)
+                self.service.split_current(orientation, split_coord, line_coords, angle)
                 self.show_current_image()
                 # Counter updated in show_current_image, but update explicitly since split adds images
                 self.update_counter()
@@ -2062,11 +2108,49 @@ class PearlEditApp(BaseTk):
                 x1, y1 = self.crop_start
                 x2, y2 = self.crop_end
                 
-                # Convert to image coordinates
-                left = int(min(x1, x2) / self.current_scale)
-                top = int(min(y1, y2) / self.current_scale)
-                right = int(max(x1, x2) / self.current_scale)
-                bottom = int(max(y1, y2) / self.current_scale)
+                # Calculate actual scale (accounting for zoom level)
+                actual_scale = self.current_scale * self.zoom_level
+                
+                # Get the image's position on the canvas
+                image_x = None
+                image_y = None
+                if self._image_item:
+                    image_bbox = self.image_canvas.bbox(self._image_item)
+                    if image_bbox:
+                        image_x = image_bbox[0]
+                        image_y = image_bbox[1]
+                
+                # Fallback: calculate position manually if bbox not available
+                if image_x is None or image_y is None:
+                    canvas_width = self.image_canvas.winfo_width()
+                    canvas_height = self.image_canvas.winfo_height()
+                    image_width = int(self.original_image.size[0] * actual_scale)
+                    image_height = int(self.original_image.size[1] * actual_scale)
+                    image_x = self.pan_x
+                    image_y = self.pan_y
+                    if image_width < canvas_width:
+                        image_x = (canvas_width - image_width) // 2 + self.pan_x
+                    if image_height < canvas_height:
+                        image_y = (canvas_height - image_height) // 2 + self.pan_y
+                
+                # Convert canvas coordinates to image-relative coordinates
+                rel_x1 = x1 - image_x
+                rel_y1 = y1 - image_y
+                rel_x2 = x2 - image_x
+                rel_y2 = y2 - image_y
+                
+                # Convert to image coordinates (accounting for actual scale)
+                left = int(min(rel_x1, rel_x2) / actual_scale)
+                top = int(min(rel_y1, rel_y2) / actual_scale)
+                right = int(max(rel_x1, rel_x2) / actual_scale)
+                bottom = int(max(rel_y1, rel_y2) / actual_scale)
+                
+                # Clamp coordinates to image bounds
+                image_width, image_height = self.original_image.size
+                left = max(0, min(left, image_width))
+                top = max(0, min(top, image_height))
+                right = max(0, min(right, image_width))
+                bottom = max(0, min(bottom, image_height))
                 
                 crop_coords = (left, top, right, bottom)
                 

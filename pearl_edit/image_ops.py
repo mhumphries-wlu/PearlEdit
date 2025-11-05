@@ -144,41 +144,149 @@ def split_image_angled(
     """
     Split image along an angled line.
     
+    Left image: pixels above the cursor line (black fill below)
+    Right image: pixels below the cursor line (black fill above)
+    
+    Uses line equation to determine which side of the line each pixel is on.
+    
     Args:
         image: PIL Image object
         line_coords: Tuple of (x1, y1, x2, y2) line coordinates
-        orientation: 'vertical' or 'horizontal' base orientation
+        orientation: 'vertical' or 'horizontal' base orientation (unused, kept for compatibility)
         
     Returns:
-        Tuple of (left/top_image, right/bottom_image)
+        Tuple of (left_image, right_image) where left is above the line, right is below
     """
     width, height = image.size
     x1, y1, x2, y2 = line_coords
     
-    # Create mask images
-    mask = Image.new('L', (width, height), 0)
-    draw = ImageDraw.Draw(mask)
+    # Calculate line direction vector
+    dx = x2 - x1
+    dy = y2 - y1
     
-    # Determine how to fill the mask based on orientation
-    if orientation == 'horizontal' or (x2 - x1) == 0:
-        # For horizontal-based splits, fill above the line
-        points = [(0, 0), (width, 0), (x2, y2), (x1, y1)]
+    # Find where the line intersects the image boundaries
+    # This ensures the line extends through the entire image at the correct angle
+    # We'll use parametric line equations: x = x1 + t*dx, y = y1 + t*dy
+    
+    intersections = []
+    
+    # Check intersection with left edge (x = 0)
+    if abs(dx) > 1e-6:
+        t = (0 - x1) / dx
+        y = y1 + t * dy
+        if 0 <= y <= height:
+            intersections.append((0, y))
+    
+    # Check intersection with right edge (x = width)
+    if abs(dx) > 1e-6:
+        t = (width - x1) / dx
+        y = y1 + t * dy
+        if 0 <= y <= height:
+            intersections.append((width, y))
+    
+    # Check intersection with top edge (y = 0)
+    if abs(dy) > 1e-6:
+        t = (0 - y1) / dy
+        x = x1 + t * dx
+        if 0 <= x <= width:
+            intersections.append((x, 0))
+    
+    # Check intersection with bottom edge (y = height)
+    if abs(dy) > 1e-6:
+        t = (height - y1) / dy
+        x = x1 + t * dx
+        if 0 <= x <= width:
+            intersections.append((x, height))
+    
+    # Remove duplicates (with tolerance for floating point)
+    unique_intersections = []
+    for point in intersections:
+        is_duplicate = False
+        for existing in unique_intersections:
+            if abs(point[0] - existing[0]) < 1e-3 and abs(point[1] - existing[1]) < 1e-3:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_intersections.append(point)
+    
+    # If we have 2 intersection points, use them
+    # Otherwise, use the original points (clamped) as fallback
+    if len(unique_intersections) >= 2:
+        # Use the two intersection points that are farthest apart
+        # This ensures we span the entire image
+        max_dist = 0
+        best_pair = (unique_intersections[0], unique_intersections[1])
+        for i in range(len(unique_intersections)):
+            for j in range(i + 1, len(unique_intersections)):
+                p1 = unique_intersections[i]
+                p2 = unique_intersections[j]
+                dist = ((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)**0.5
+                if dist > max_dist:
+                    max_dist = dist
+                    best_pair = (p1, p2)
+        x1, y1 = best_pair[0]
+        x2, y2 = best_pair[1]
     else:
-        # For vertical-based splits, fill left of the line
-        points = [(0, 0), (x1, y1), (x2, y2), (0, height)]
-        
-    # Draw the polygon to create the mask
-    draw.polygon(points, fill=255)
+        # Fallback: clamp to bounds (shouldn't happen, but safety)
+        x1 = max(0, min(x1, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        x2 = max(0, min(x2, width - 1))
+        y2 = max(0, min(y2, height - 1))
     
-    # Create left and right images
+    # Recalculate dx, dy after getting intersection points
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    # Create coordinate grids
+    y_coords, x_coords = np.mgrid[0:height, 0:width]
+    
+    # Handle edge case: vertical line
+    if abs(dx) < 1e-6:
+        # Vertical line: left = pixels to the left of line (x < x1)
+        # Above/below doesn't make sense for vertical, so use left/right
+        above_mask = (x_coords < x1).astype(np.uint8) * 255
+    # Handle edge case: horizontal line
+    elif abs(dy) < 1e-6:
+        # Horizontal line: left = pixels above the line (y < y1)
+        above_mask = (y_coords < y1).astype(np.uint8) * 255
+    else:
+        # General case: use line equation to determine above/below
+        # Line equation: (y - y1)(x2 - x1) - (x - x1)(y2 - y1) = 0
+        # For a point (x, y) to be "above" the line, it means:
+        # At that x coordinate, the point's y is smaller than the line's y value
+        
+        line_value = (y_coords - y1) * dx - (x_coords - x1) * dy
+        
+        # Determine which sign means "above" by testing a point we know is above
+        # Use a point with the same x as the start point but smaller y (definitely above)
+        test_x = x1
+        test_y = max(0, y1 - 10)  # A point 10 pixels above the start point
+        test_value = (test_y - y1) * dx - (test_x - x1) * dy
+        
+        # If this test point gives negative value, then negative = above
+        # If positive, then positive = above
+        if test_value < 0:
+            # Negative means above
+            above_mask = (line_value < 0).astype(np.uint8) * 255
+        else:
+            # Positive means above
+            above_mask = (line_value > 0).astype(np.uint8) * 255
+    
+    # Convert numpy array to PIL Image
+    above_mask_img = Image.fromarray(above_mask, mode='L')
+    
+    # Create left and right images (full size, with black background)
     left_image = Image.new('RGB', (width, height), (0, 0, 0))
     right_image = Image.new('RGB', (width, height), (0, 0, 0))
     
-    # Copy the appropriate parts of the original image
-    left_image.paste(image, mask=mask)
-    right_image.paste(image, mask=ImageChops.invert(mask))
+    # Left image: paste pixels that are above the line
+    left_image.paste(image, mask=above_mask_img)
     
-    # Crop images to content
+    # Right image: paste pixels that are below the line (inverse mask)
+    below_mask_img = ImageChops.invert(above_mask_img)
+    right_image.paste(image, mask=below_mask_img)
+    
+    # Crop images to content (remove black edges)
     left_bbox = left_image.convert('L').getbbox()
     right_bbox = right_image.convert('L').getbbox()
     

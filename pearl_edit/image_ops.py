@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageChops
 from typing import Tuple, Optional
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -523,3 +524,319 @@ def auto_straighten(image_path: str, threshold: int = 127) -> bool:
     except Exception as e:
         logger.error(f"Error during auto-straighten: {e}")
         raise ImageProcessingError(f"Error during auto-straighten: {str(e)}") from e
+
+
+def detect_gutter_line(
+    image: np.ndarray,
+    threshold: int,
+    angle_max_deg: float = 12.0,
+    min_length_ratio: float = 0.6,
+    scale_factor: float = 0.5
+) -> Tuple[Optional[Tuple[int, int, int, int]], float]:
+    """
+    Detect the gutter seam line in a book scan image.
+    
+    Args:
+        image: BGR image as numpy array
+        threshold: Threshold value for black-hat binary mask (0-255)
+        angle_max_deg: Maximum angle deviation from vertical (degrees)
+        min_length_ratio: Minimum line length as ratio of image height
+        scale_factor: Scale down image for faster processing (0.0-1.0)
+        
+    Returns:
+        Tuple of (line_coords, confidence) where:
+        - line_coords: (x1, y1, x2, y2) in original image space, or None if not found
+        - confidence: float in [0, 1], higher is better
+    """
+    try:
+        if image is None or image.size == 0:
+            return None, 0.0
+        
+        height, width = image.shape[:2]
+        if height < 50 or width < 50:
+            logger.warning("Image too small for seam detection")
+            return None, 0.0
+        
+        # Work on scaled-down version for speed
+        work_height = int(height * scale_factor)
+        work_width = int(width * scale_factor)
+        if work_height < 20 or work_width < 20:
+            scale_factor = 1.0
+            work_height = height
+            work_width = width
+        
+        if scale_factor < 1.0:
+            work_image = cv2.resize(image, (work_width, work_height), interpolation=cv2.INTER_AREA)
+        else:
+            work_image = image.copy()
+        
+        # Preprocess: grayscale -> CLAHE -> blur
+        gray = cv2.cvtColor(work_image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply CLAHE for better contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+        
+        # Small blur to reduce noise
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        
+        # Multi-scale black-hat morphology to emphasize vertical dark seams
+        kernels = [
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, 17)),
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25)),
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 31))
+        ]
+        
+        blackhat = np.zeros_like(gray, dtype=np.float32)
+        for kernel in kernels:
+            bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+            blackhat = blackhat + bh.astype(np.float32)
+        
+        # Normalize to 0-255
+        blackhat = np.clip(blackhat, 0, 255).astype(np.uint8)
+        
+        # Threshold to binary mask
+        _, mask = cv2.threshold(blackhat, threshold, 255, cv2.THRESH_BINARY)
+        
+        # Apply Canny edge detection on mask
+        edges = cv2.Canny(mask, 50, 150)
+        
+        # HoughLinesP parameters
+        angle_max_rad = math.radians(angle_max_deg)
+        min_length = int(work_height * min_length_ratio)
+        
+        # Find lines with HoughLinesP
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,  # 1 degree resolution
+            threshold=max(10, min_length // 10),
+            minLineLength=min_length,
+            maxLineGap=max(5, min_length // 20)
+        )
+        
+        best_line = None
+        best_score = 0.0
+        candidates = []
+        
+        if lines is not None:
+            center_x = work_width / 2.0
+            center_y = work_height / 2.0
+            
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                
+                # Calculate line properties
+                dx = x2 - x1
+                dy = y2 - y1
+                length = math.sqrt(dx * dx + dy * dy)
+                
+                if length < min_length:
+                    continue
+                
+                # Calculate angle from vertical
+                angle = math.atan2(abs(dx), abs(dy))  # angle from vertical
+                if angle > angle_max_rad:
+                    continue
+                
+                # Calculate center of line
+                line_center_x = (x1 + x2) / 2.0
+                line_center_y = (y1 + y2) / 2.0
+                
+                # Center bias: prefer lines near image center
+                center_dist = abs(line_center_x - center_x)
+                center_bias = 1.0 - min(center_dist / (work_width * 0.5), 1.0)
+                
+                # Calculate intensity along line in blackhat image
+                # Sample points along the line
+                num_samples = max(10, int(length / 5))
+                intensities = []
+                for i in range(num_samples):
+                    t = i / (num_samples - 1) if num_samples > 1 else 0
+                    x = int(x1 + t * dx)
+                    y = int(y1 + t * dy)
+                    if 0 <= x < work_width and 0 <= y < work_height:
+                        intensities.append(blackhat[y, x])
+                
+                if not intensities:
+                    continue
+                
+                avg_intensity = np.mean(intensities) / 255.0
+                
+                # Coverage: how much of image height the line covers
+                y_min = min(y1, y2)
+                y_max = max(y1, y2)
+                coverage = (y_max - y_min) / work_height
+                
+                # Angle bias: prefer more vertical lines
+                angle_bias = 1.0 - (angle / angle_max_rad)
+                
+                # Combined score (weights: 0.5 intensity, 0.2 coverage, 0.2 center, 0.1 angle)
+                score = (
+                    0.5 * avg_intensity +
+                    0.2 * coverage +
+                    0.2 * center_bias +
+                    0.1 * angle_bias
+                )
+                
+                candidates.append({
+                    'line': (x1, y1, x2, y2),
+                    'score': score,
+                    'intensity': avg_intensity,
+                    'coverage': coverage,
+                    'center_bias': center_bias,
+                    'angle_bias': angle_bias
+                })
+                
+                if score > best_score:
+                    best_score = score
+                    best_line = (x1, y1, x2, y2)
+        
+        # Fallback: sweep small angles if no good Hough line found
+        if best_line is None or best_score < 0.3:
+            logger.debug("No good Hough line found, trying angle sweep fallback")
+            
+            # Try lines at different angles through center
+            best_fallback_score = 0.0
+            best_fallback_line = None
+            
+            center_x_int = work_width // 2
+            angle_range = math.radians(angle_max_deg * 2)  # Allow ±angle_max_deg
+            num_angles = 20
+            offset_range = work_width * 0.1  # ±10% width
+            
+            for angle_idx in range(num_angles):
+                angle = -angle_range / 2 + (angle_idx / (num_angles - 1)) * angle_range
+                
+                for offset_idx in range(11):  # 11 offsets including center
+                    offset = -offset_range + (offset_idx / 10.0) * offset_range * 2
+                    x_center = center_x_int + offset
+                    
+                    # Calculate line endpoints
+                    dx_per_pixel = math.tan(angle)
+                    half_height = work_height / 2
+                    
+                    x1 = int(x_center - half_height * dx_per_pixel)
+                    x2 = int(x_center + half_height * dx_per_pixel)
+                    y1 = 0
+                    y2 = work_height - 1
+                    
+                    if x1 < 0 or x1 >= work_width or x2 < 0 or x2 >= work_width:
+                        continue
+                    
+                    # Sample intensity along this line
+                    intensities = []
+                    num_samples = 50
+                    for i in range(num_samples):
+                        t = i / (num_samples - 1) if num_samples > 1 else 0
+                        x = int(x1 + t * (x2 - x1))
+                        y = int(y1 + t * (y2 - y1))
+                        if 0 <= x < work_width and 0 <= y < work_height:
+                            # Sample a small band around the line
+                            band_sum = 0
+                            band_count = 0
+                            for bx in range(max(0, x - 1), min(work_width, x + 2)):
+                                for by in range(max(0, y - 1), min(work_height, y + 2)):
+                                    band_sum += blackhat[by, bx]
+                                    band_count += 1
+                            if band_count > 0:
+                                intensities.append(band_sum / band_count)
+                    
+                    if not intensities:
+                        continue
+                    
+                    avg_intensity = np.mean(intensities) / 255.0
+                    
+                    if avg_intensity > best_fallback_score:
+                        best_fallback_score = avg_intensity
+                        best_fallback_line = (x1, y1, x2, y2)
+            
+            if best_fallback_line and best_fallback_score > 0.15:
+                best_line = best_fallback_line
+                best_score = best_fallback_score * 0.8  # Slightly lower confidence for fallback
+        
+        if best_line is None:
+            return None, 0.0
+        
+        # Scale coordinates back to original image size
+        if scale_factor < 1.0:
+            x1, y1, x2, y2 = best_line
+            x1 = int(x1 / scale_factor)
+            y1 = int(y1 / scale_factor)
+            x2 = int(x2 / scale_factor)
+            y2 = int(y2 / scale_factor)
+            best_line = (x1, y1, x2, y2)
+        
+        # Calculate confidence
+        # Base confidence from score, but also consider margin over second-best
+        confidence = min(1.0, best_score)
+        
+        if len(candidates) > 1:
+            # Sort by score descending
+            candidates_sorted = sorted(candidates, key=lambda c: c['score'], reverse=True)
+            if candidates_sorted[0]['score'] > 0:
+                ratio = candidates_sorted[1]['score'] / candidates_sorted[0]['score'] if len(candidates_sorted) > 1 else 0
+                # Higher margin = higher confidence
+                margin_factor = 1.0 - (ratio * 0.5)  # Reduce confidence if close second exists
+                confidence *= margin_factor
+        
+        # Ensure confidence is reasonable
+        confidence = max(0.0, min(1.0, confidence))
+        
+        logger.debug(f"Detected gutter line with confidence {confidence:.2f}, score {best_score:.2f}")
+        
+        return best_line, confidence
+        
+    except Exception as e:
+        logger.error(f"Error detecting gutter line: {e}")
+        return None, 0.0
+
+
+def find_optimal_seam_threshold(
+    image: np.ndarray,
+    angle_max_deg: float = 12.0,
+    min_length_ratio: float = 0.6
+) -> int:
+    """
+    Find the optimal threshold for seam detection by grid search.
+    
+    Args:
+        image: BGR image as numpy array
+        angle_max_deg: Maximum angle deviation from vertical (degrees)
+        min_length_ratio: Minimum line length as ratio of image height
+        
+    Returns:
+        Optimal threshold value (0-255) that maximizes confidence
+    """
+    try:
+        if image is None or image.size == 0:
+            return 140  # Default
+        
+        best_threshold = 140
+        best_confidence = 0.0
+        
+        # Coarse grid search
+        for threshold in range(50, 200, 10):
+            line_coords, confidence = detect_gutter_line(
+                image, threshold, angle_max_deg, min_length_ratio
+            )
+            if confidence > best_confidence:
+                best_confidence = confidence
+                best_threshold = threshold
+        
+        # Fine refinement around best threshold
+        if best_threshold > 50 and best_threshold < 200:
+            for threshold in range(max(50, best_threshold - 9), min(200, best_threshold + 10)):
+                line_coords, confidence = detect_gutter_line(
+                    image, threshold, angle_max_deg, min_length_ratio
+                )
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_threshold = threshold
+        
+        logger.debug(f"Optimal seam threshold: {best_threshold} (confidence: {best_confidence:.2f})")
+        return best_threshold
+        
+    except Exception as e:
+        logger.error(f"Error finding optimal seam threshold: {e}")
+        return 140  # Default fallback

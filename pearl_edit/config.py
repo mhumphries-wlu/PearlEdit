@@ -34,6 +34,10 @@ class AppSettings:
     default_quality: int = 95
     batch_process: bool = False
     suppress_all_images_warning: bool = False
+    seam_threshold: int = 140
+    seam_confidence_min: float = 0.55
+    seam_angle_max_deg: float = 12.0
+    seam_min_length_ratio: float = 0.6
     
     def to_dict(self) -> dict:
         """Convert settings to dictionary."""

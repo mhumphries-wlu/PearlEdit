@@ -20,6 +20,7 @@ from ..services import ImageService, UserFacingError
 from ..config import AppSettings, load_settings
 from ..paths import TempManager
 from .threshold_adjuster import ThresholdAdjuster
+from .seam_finder import SeamFinderDialog
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +455,18 @@ class PearlEditApp(BaseTk):
             "Split Tool: To change between Horizontal and Vertical Cursor use Ctrl+H and Ctrl+V | To rotate cursor use [ and ] | To split image, click mouse"
         )
         self.split_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        def autosplit_finder_wrapper():
+            self.update_status_display("Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line")
+            self.auto_split_current_finder()
+        self.autosplit_finder_button = self.create_button_with_hint(
+            split_buttons,
+            self.split_icon,  # Reuse split icon for now
+            autosplit_finder_wrapper,
+            "Auto Split (Finder)\nAutomatically detect book seam\nAdjust threshold in dialog\nClick Apply Split to split",
+            "Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line"
+        )
+        self.autosplit_finder_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Label for Split
         split_label = tk.Label(
@@ -2146,6 +2159,176 @@ class PearlEditApp(BaseTk):
             threading.Thread(target=process, daemon=True).start()
         
         ThresholdAdjuster(self, image_path, self.service, start_straighten_all, mode='straighten')
+    
+    def auto_split_current_finder(self):
+        """Auto-split current image using seam finder dialog."""
+        current = self.service.get_current_image()
+        if not current:
+            return
+        
+        # Check if apply to all is enabled
+        if self.apply_to_all.get():
+            # Show warning if not suppressed
+            if not self.show_all_images_warning("Auto Split"):
+                return
+            # Use auto_split_all_finder function
+            self.auto_split_all_finder()
+            return
+        
+        image_path = current.current_image_path
+        
+        def apply_split(line_coords, threshold):
+            try:
+                # Update settings
+                self.service.settings.seam_threshold = threshold
+                # Use service method which has history tracking
+                self.service.split_current('angled', line_coords=line_coords)
+                self.show_current_image()
+                # Advance to next image if batch processing is enabled
+                if self.batch_process.get():
+                    # Check if we're not at the last image before navigating
+                    current_index = self.service.state.current_image_index
+                    total_images = len(self.service.state.images)
+                    if current_index < total_images - 1:
+                        # Navigate to next image and continue processing
+                        self.after(100, lambda: self.navigate_images(1))
+                        self.after(200, self.auto_split_current_finder)
+            except UserFacingError as e:
+                messagebox.showerror("Error", str(e))
+            except Exception as e:
+                messagebox.showerror("Error", f"Error during auto-split: {str(e)}")
+        
+        def skip_split():
+            # Just skip, no action needed
+            pass
+        
+        SeamFinderDialog(self, image_path, self.service, apply_split, skip_split)
+    
+    def auto_split_all_finder(self):
+        """Auto-split all images with seam finder, prompting on low confidence."""
+        current = self.service.get_current_image()
+        if not current:
+            return
+        
+        image_path = current.current_image_path
+        
+        # Show initial progress window
+        progress_window = tk.Toplevel(self)
+        progress_window.title("Auto-splitting Progress")
+        progress_window.geometry("300x150")
+        progress_window.transient(self)
+        
+        progress_label = ttk.Label(progress_window, text="Processing images...", padding=10)
+        progress_label.pack()
+        
+        progress_bar = ttk.Progressbar(progress_window, length=200, mode='determinate')
+        progress_bar.pack(pady=20)
+        
+        total = len(self.service.state.images)
+        progress_bar['maximum'] = total
+        
+        def update_progress(current_num, total_num, message):
+            progress_bar['value'] = current_num
+            progress_label.config(text=message)
+            progress_window.update()
+        
+        self.service.set_progress_callback(update_progress)
+        
+        def process_all():
+            import cv2
+            from ..image_ops import detect_gutter_line
+            
+            try:
+                processed_count = 0
+                skipped_count = 0
+                low_confidence_indices = []
+                
+                # First pass: detect and auto-apply where confident
+                for i, record in enumerate(self.service.state.images):
+                    self.service.state.current_image_index = i
+                    image_path = record.current_image_path
+                    
+                    update_progress(i + 1, total, f"Processing image {i + 1} of {total}")
+                    
+                    # Load image
+                    image = cv2.imread(str(image_path))
+                    if image is None:
+                        logger.warning(f"Could not load image: {image_path}")
+                        skipped_count += 1
+                        continue
+                    
+                    # Detect seam with current settings
+                    settings = self.service.settings
+                    line_coords, confidence = detect_gutter_line(
+                        image,
+                        settings.seam_threshold,
+                        settings.seam_angle_max_deg,
+                        settings.seam_min_length_ratio
+                    )
+                    
+                    # If confidence is high enough, apply automatically
+                    if line_coords and confidence >= settings.seam_confidence_min:
+                        try:
+                            self.service.split_current('angled', line_coords=line_coords)
+                            processed_count += 1
+                        except UserFacingError as e:
+                            logger.error(f"Error splitting image {i + 1}: {e}")
+                            skipped_count += 1
+                    else:
+                        # Low confidence - mark for manual review
+                        low_confidence_indices.append(i)
+                
+                # Close progress window
+                progress_window.destroy()
+                
+                # Second pass: prompt for low-confidence images
+                if low_confidence_indices:
+                    for idx in low_confidence_indices:
+                        self.service.state.current_image_index = idx
+                        record = self.service.state.images[idx]
+                        image_path = record.current_image_path
+                        
+                        # Show dialog for this image
+                        dialog_result = {'action': 'skip'}  # Default to skip
+                        
+                        def apply_split(line_coords, threshold):
+                            try:
+                                self.service.settings.seam_threshold = threshold
+                                self.service.split_current('angled', line_coords=line_coords)
+                                dialog_result['action'] = 'applied'
+                                self.show_current_image()
+                            except UserFacingError as e:
+                                messagebox.showerror("Error", str(e))
+                        
+                        def skip_split():
+                            dialog_result['action'] = 'skip'
+                        
+                        # Create and wait for dialog
+                        dialog = SeamFinderDialog(self, image_path, self.service, apply_split, skip_split)
+                        self.wait_window(dialog)
+                        
+                        if dialog_result['action'] == 'applied':
+                            processed_count += 1
+                        else:
+                            skipped_count += 1
+                        
+                        self.show_current_image()
+                
+                # Show completion message
+                message = f"Auto-splitting completed!\n\nProcessed: {processed_count}\nSkipped: {skipped_count}"
+                if low_confidence_indices:
+                    message += f"\n\nReviewed: {len(low_confidence_indices)} low-confidence images"
+                
+                messagebox.showinfo("Auto-split Complete", message)
+                self.show_current_image()
+                
+            except Exception as e:
+                logger.error(f"Error in auto_split_all_finder: {e}")
+                messagebox.showerror("Error", f"An error occurred during auto-split: {str(e)}")
+                progress_window.destroy()
+        
+        import threading
+        threading.Thread(target=process_all, daemon=True).start()
     
     def activate_crop_tool(self, event=None):
         """Activate crop tool."""

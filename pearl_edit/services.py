@@ -345,7 +345,7 @@ class ImageService:
         angle: Optional[float] = None
     ) -> bool:
         """
-        Split current image.
+        Split current image. Can split original images or already-split images (re-splitting).
         
         Args:
             orientation: 'vertical', 'horizontal', or 'angled'
@@ -363,13 +363,9 @@ class ImageService:
         if not current:
             raise UserFacingError("No image selected")
         
-        # Always use the original image for splitting, not any split version
-        # This ensures we're splitting the original A, B, C images, not already-split images
-        image_path = current.original_image
-        
-        # Skip if this image is already split
-        if current.left_or_right is not None:
-            raise UserFacingError("This image is already split. Please select an unsplit image.")
+        # Use current image path for splitting (works for both original and split images)
+        # This allows re-splitting of already-split images
+        image_path = current.current_image_path
         
         # Update history manager temp_dir if needed
         if self.temp_manager.path:
@@ -379,8 +375,12 @@ class ImageService:
                 self.history.history_dir.mkdir(exist_ok=True)
         
         try:
-            # Start history operation
+            # Start history operation - include both the current image and the original
+            # The current image will be replaced by the splits, so we need to track it
             affected_paths = [image_path]
+            # Also include original if it's different (for proper undo tracking)
+            if current.original_image != image_path:
+                affected_paths.append(current.original_image)
             op_id = self.history.start("split_current", affected_paths, self.state)
             
             # Load image
@@ -410,8 +410,8 @@ class ImageService:
                 else:
                     raise UserFacingError(f"Invalid orientation: {orientation}")
                 
-                # Generate filenames using the original image path
-                # This ensures consistent sequence numbering based on the original image
+                # Generate filenames using the current image path as base
+                # This works for both original and split images
                 left_path = generate_split_filename(image_path, current.image_index, False)
                 right_path = generate_split_filename(image_path, current.image_index, True)
                 
@@ -419,11 +419,12 @@ class ImageService:
                 left_img.save(str(left_path), 'JPEG', quality=self.settings.default_quality, optimize=True)
                 right_img.save(str(right_path), 'JPEG', quality=self.settings.default_quality, optimize=True)
                 
-                # Update records
+                # Update current record to become the left split
                 current.split_image = left_path
                 current.left_or_right = 'Left'
                 
                 # Create right image record
+                # Preserve the original_image reference (ultimate original) for proper tracking
                 right_record = ImageRecord(
                     image_index=len(self.state.images) + 1,
                     original_image=current.original_image,
@@ -439,8 +440,10 @@ class ImageService:
                 for i, img in enumerate(self.state.images):
                     img.image_index = i + 1
                 
-                # Commit with created files
-                self.history.commit(op_id, created_paths=[left_path, right_path])
+                # Commit with created files (new splits)
+                # Also track the old split image if it was a re-split (will be deleted/overwritten)
+                created_files = [left_path, right_path]
+                self.history.commit(op_id, created_paths=created_files)
                 self.state.mark_changed()
                 return True
                 
@@ -458,7 +461,7 @@ class ImageService:
         angle: Optional[float] = None
     ) -> None:
         """
-        Split all unsplit images.
+        Split all images. Can split original images or already-split images (re-splitting).
         
         Args:
             orientation: 'vertical', 'horizontal', or 'angled'
@@ -476,16 +479,17 @@ class ImageService:
                 self.history.history_dir = self.temp_manager.path / "history"
                 self.history.history_dir.mkdir(exist_ok=True)
         
-        # Collect all affected paths (all original images that aren't split)
+        # Collect all affected paths (all images, including split ones for re-splitting)
         affected_paths = []
-        unsplit_indices = []
         for i, record in enumerate(self.state.images):
-            if record.left_or_right is None:
+            image_path = record.current_image_path
+            affected_paths.append(image_path)
+            # Also include original if it's different (for proper undo tracking)
+            if record.original_image != image_path:
                 affected_paths.append(record.original_image)
-                unsplit_indices.append(i)
         
         if not affected_paths:
-            raise UserFacingError("No unsplit images to process")
+            raise UserFacingError("No images to process")
         
         # Start history operation (single entry for batch)
         op_id = self.history.start("split_all", affected_paths, self.state)
@@ -494,21 +498,16 @@ class ImageService:
         created_files = []
         current_idx = 0
         
-        # Process unsplit images (skip already-split ones)
+        # Process all images (including already-split ones for re-splitting)
         while current_idx < len(self.state.images):
             record = self.state.images[current_idx]
-            
-            # Skip if already split
-            if record.left_or_right is not None:
-                current_idx += 1
-                continue
             
             try:
                 # Set current index for proper state tracking
                 self.state.current_image_index = current_idx
                 
-                # Perform split using split_current logic
-                image_path = record.original_image
+                # Use current image path for splitting (works for both original and split images)
+                image_path = record.current_image_path
                 
                 with Image.open(image_path) as img:
                     image = img.convert("RGB")
@@ -531,7 +530,7 @@ class ImageService:
                     else:
                         raise UserFacingError(f"Invalid orientation: {orientation}")
                     
-                    # Generate filenames
+                    # Generate filenames using the current image path as base
                     left_path = generate_split_filename(image_path, record.image_index, False)
                     right_path = generate_split_filename(image_path, record.image_index, True)
                     
@@ -546,6 +545,7 @@ class ImageService:
                     record.left_or_right = 'Left'
                     
                     # Create right image record
+                    # Preserve the original_image reference (ultimate original) for proper tracking
                     right_record = ImageRecord(
                         image_index=len(self.state.images) + 1,
                         original_image=record.original_image,
@@ -560,15 +560,15 @@ class ImageService:
                     for i, img in enumerate(self.state.images):
                         img.image_index = i + 1
                     
-                    # Skip both left and right, move to next unsplit
+                    # Skip both left and right, move to next image
                     current_idx += 2
                     
             except ImageProcessingError as e:
-                errors.append(f"Image {record.original_image.name}: {str(e)}")
+                errors.append(f"Image {record.current_image_path.name}: {str(e)}")
                 current_idx += 1
             except Exception as e:
-                logger.error(f"Error splitting image {record.original_image.name}: {e}")
-                errors.append(f"Image {record.original_image.name}: {str(e)}")
+                logger.error(f"Error splitting image {record.current_image_path.name}: {e}")
+                errors.append(f"Image {record.current_image_path.name}: {str(e)}")
                 current_idx += 1
         
         if errors:

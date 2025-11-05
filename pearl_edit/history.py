@@ -282,31 +282,80 @@ class HistoryManager:
                 with open(created_file, 'w') as f:
                     json.dump(created_data, f, indent=2)
             
-            # Restore state
+            # Read state to know which files need to be restored
             state_file = op_dir / "state_pre.json"
             with open(state_file, 'r') as f:
                 state_data = json.load(f)
-            restore_state(session_state, state_data, self.temp_dir)
             
-            # Restore files
-            restore_files_dir = op_dir / "files"
-            if restore_files_dir.exists():
-                for backup_file in restore_files_dir.iterdir():
-                    if backup_file.is_file():
-                        # Find file in current temp directory and restore
-                        target_file = self.temp_dir / backup_file.name
-                        try:
-                            shutil.copy2(backup_file, target_file)
-                        except Exception as e:
-                            logger.warning(f"Failed to restore {backup_file.name}: {e}")
-            
-            # Delete created files
+            # Delete created files FIRST to avoid filename collisions
+            # This is critical when re-splitting, as the left split might overwrite
+            # the old split image file with the same name
             for created_path in created_files:
                 if created_path.exists():
                     try:
                         created_path.unlink()
+                        logger.debug(f"Deleted created file for undo: {created_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete created file {created_path}: {e}")
+            
+            # Restore files from backup, ensuring they exist before restoring state
+            # This ensures files exist when state references them
+            restore_files_dir = op_dir / "files"
+            if restore_files_dir.exists():
+                # Build a map of backup files by name for quick lookup
+                backup_files = {}
+                for backup_file in restore_files_dir.iterdir():
+                    if backup_file.is_file():
+                        backup_files[backup_file.name] = backup_file
+                
+                # Restore files that are referenced in the state
+                # This ensures we restore to the exact paths needed
+                def resolve_path(path_str: Optional[str]) -> Optional[Path]:
+                    if path_str is None:
+                        return None
+                    path = Path(path_str)
+                    if path.is_absolute():
+                        return path
+                    return self.temp_dir / path
+                
+                # Restore all files that might be referenced
+                for img_data in state_data.get('images', []):
+                    # Restore original_image if it exists in backup
+                    orig_path = resolve_path(img_data.get('original_image'))
+                    if orig_path and orig_path.name in backup_files:
+                        try:
+                            # Ensure parent directory exists
+                            orig_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup_files[orig_path.name], orig_path)
+                            logger.debug(f"Restored original image: {orig_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to restore {orig_path.name}: {e}")
+                    
+                    # Restore split_image if it exists in backup
+                    split_path = resolve_path(img_data.get('split_image'))
+                    if split_path and split_path.name in backup_files:
+                        try:
+                            # Ensure parent directory exists
+                            split_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup_files[split_path.name], split_path)
+                            logger.debug(f"Restored split image: {split_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to restore {split_path.name}: {e}")
+                
+                # Also restore any other files in the backup that might be needed
+                for backup_name, backup_file in backup_files.items():
+                    target_file = self.temp_dir / backup_name
+                    # Only restore if not already restored above
+                    if not target_file.exists():
+                        try:
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup_file, target_file)
+                            logger.debug(f"Restored additional file: {target_file}")
+                        except Exception as e:
+                            logger.warning(f"Failed to restore {backup_name}: {e}")
+            
+            # Now restore state (files should exist now)
+            restore_state(session_state, state_data, self.temp_dir)
             
             # Add to redo stack
             self.redo_stack.append(current_op_id)
@@ -372,24 +421,67 @@ class HistoryManager:
                     created_data = json.load(f)
                     created_files = [Path(p) for p in created_data.get('files', [])]
             
-            # Restore state
+            # Read state to know which files need to be restored
             state_file = op_dir / "state_pre.json"
             with open(state_file, 'r') as f:
                 state_data = json.load(f)
-            restore_state(session_state, state_data, self.temp_dir)
             
-            # Restore files
+            # Restore files FIRST, before restoring state
+            # This ensures files exist when state references them
             restore_files_dir = op_dir / "files"
             if restore_files_dir.exists():
+                # Build a map of backup files by name for quick lookup
+                backup_files = {}
                 for backup_file in restore_files_dir.iterdir():
                     if backup_file.is_file():
-                        target_file = self.temp_dir / backup_file.name
+                        backup_files[backup_file.name] = backup_file
+                
+                # Restore files that are referenced in the state
+                def resolve_path(path_str: Optional[str]) -> Optional[Path]:
+                    if path_str is None:
+                        return None
+                    path = Path(path_str)
+                    if path.is_absolute():
+                        return path
+                    return self.temp_dir / path
+                
+                # Restore all files that might be referenced
+                for img_data in state_data.get('images', []):
+                    # Restore original_image if it exists in backup
+                    orig_path = resolve_path(img_data.get('original_image'))
+                    if orig_path and orig_path.name in backup_files:
                         try:
-                            shutil.copy2(backup_file, target_file)
+                            # Ensure parent directory exists
+                            orig_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup_files[orig_path.name], orig_path)
+                            logger.debug(f"Restored original image for redo: {orig_path}")
                         except Exception as e:
-                            logger.warning(f"Failed to restore {backup_file.name}: {e}")
+                            logger.warning(f"Failed to restore {orig_path.name}: {e}")
+                    
+                    # Restore split_image if it exists in backup
+                    split_path = resolve_path(img_data.get('split_image'))
+                    if split_path and split_path.name in backup_files:
+                        try:
+                            # Ensure parent directory exists
+                            split_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup_files[split_path.name], split_path)
+                            logger.debug(f"Restored split image for redo: {split_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to restore {split_path.name}: {e}")
+                
+                # Also restore any other files in the backup that might be needed
+                for backup_name, backup_file in backup_files.items():
+                    target_file = self.temp_dir / backup_name
+                    # Only restore if not already restored above
+                    if not target_file.exists():
+                        try:
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup_file, target_file)
+                            logger.debug(f"Restored additional file for redo: {target_file}")
+                        except Exception as e:
+                            logger.warning(f"Failed to restore {backup_name}: {e}")
             
-            # Restore created files
+            # Restore created files (these will overwrite any conflicting restored files, which is correct for redo)
             created_files_dir = op_dir / "created_files"
             if created_files_dir.exists():
                 for created_backup in created_files_dir.iterdir():
@@ -401,9 +493,13 @@ class HistoryManager:
                                     # Ensure parent directory exists
                                     created_path.parent.mkdir(parents=True, exist_ok=True)
                                     shutil.copy2(created_backup, created_path)
+                                    logger.debug(f"Restored created file for redo: {created_path}")
                                 except Exception as e:
                                     logger.warning(f"Failed to restore created file {created_path}: {e}")
                                 break
+            
+            # Now restore state (files should exist now)
+            restore_state(session_state, state_data, self.temp_dir)
             
             # Add to undo stack
             self.undo_stack.append(current_op_id)

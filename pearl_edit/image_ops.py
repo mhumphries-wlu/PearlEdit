@@ -477,29 +477,23 @@ def auto_straighten(image_path: str, threshold: int = 127) -> bool:
         # Get minimum area rectangle
         rect = cv2.minAreaRect(largest_contour)
         # rect format: ((center_x, center_y), (width, height), angle)
-        # In OpenCV, width is always >= height, and angle is in [-90, 0) degrees
-        # The angle represents the rotation of the width (longest) side relative to horizontal
-        _, (w, h), theta = rect
-        
-        # Theta is in [-90, 0) range (negative = clockwise from horizontal)
-        # To straighten, we need to rotate counter-clockwise (positive direction)
-        # If |theta| <= 45°, rotate toward horizontal (0°): rotation = -theta
-        # If |theta| > 45°, rotate toward vertical (90°): rotation = 90 - |theta|
-        
-        abs_theta = abs(theta)  # Angle in [0, 90) range
-        
-        if abs_theta <= 45:
-            # Closer to horizontal, rotate to 0°
-            # Theta is negative (e.g., -30°), so -theta gives positive rotation (counter-clockwise)
-            rotation_needed = -theta
-        else:
-            # Closer to vertical (45° to 90°), rotate to 90°
-            # Rotate counter-clockwise by (90 - abs_theta) degrees
-            rotation_needed = 90 - abs_theta
+        # OpenCV returns angle in [-90, 0). Define orientation of the long edge:
+        # if height > width, add 90 so angle reflects long-edge tilt relative to horizontal.
+        (cx, cy), (w, h), theta = rect
+
+        # Normalize angle so it represents the long edge orientation in (-90, 90]
+        angle = float(theta)
+        if w < h:
+            angle = angle + 90.0
+
+        # Rotate toward the nearest canonical orientation: -90°, 0°, or 90°
+        targets = (-90.0, 0.0, 90.0)
+        best_target = min(targets, key=lambda t: abs(angle - t))
+        rotation_needed = angle - best_target
         
         # Add deadzone to avoid micro-rotations on already-straight images
         if abs(rotation_needed) < 0.25:
-            logger.info(f"Image already straight (detected angle: {abs_theta:.2f}°)")
+            logger.info(f"Image already straight (detected angle: {abs(angle):.2f}°)")
             return True
         
         # Rotate the image
@@ -887,6 +881,330 @@ def compute_largest_white_roi(
             height, width = gray.shape[:2]
             return (0, 0, width, height)
         return (0, 0, 0, 0)
+
+
+def detect_gutter_line_two_pages(
+    image: np.ndarray,
+    roi_threshold: int,
+    angle_max_deg: float = 20.0,
+    scale_width: int = 1200,
+    sensitivity: Optional[int] = None
+) -> Tuple[Optional[Tuple[int, int, int, int]], float]:
+    """
+    Fast seam detector for already-cropped two-page documents using two components.
+
+    Approach:
+    - Downscale to a fixed working width for speed; operate at that scale.
+    - Threshold to white-on-black using the provided ROI threshold (Otsu fallback).
+    - Morphology: square close to connect text islands; vertical open to break
+      thin white bridges in the gutter so two pages remain separate.
+    - Keep two largest white components; if side-by-side with strong vertical
+      overlap, compute the midline between their facing edges per row and fit a
+      straight line x = m*y + b (clamped to ±angle_max_deg from vertical).
+
+    Args:
+        image: BGR image as numpy array (full resolution)
+        roi_threshold: Binary threshold for page whitening (0-255)
+        angle_max_deg: Max allowed angle from vertical for the seam
+        scale_width: Working width for downscale (keeps runtime bounded)
+        sensitivity: Optional 0-255; controls vertical open kernel length
+
+    Returns:
+        (line_coords, confidence) where line_coords=(x1,y1,x2,y2) in original
+        image coordinates, or (None, 0.0) if not detected.
+    """
+    try:
+        if image is None or image.size == 0:
+            return None, 0.0
+
+        # Downscale for speed
+        h0, w0 = image.shape[:2]
+        if w0 > scale_width:
+            scale = scale_width / float(w0)
+            work_w = int(round(w0 * scale))
+            work_h = int(round(h0 * scale))
+            work_img = cv2.resize(image, (work_w, work_h), interpolation=cv2.INTER_AREA)
+        else:
+            scale = 1.0
+            work_img = image
+            work_h, work_w = h0, w0
+
+        # Grayscale + optional CLAHE for microfilm contrast
+        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+        except Exception:
+            pass
+
+        # Threshold; Otsu fallback if very few white pixels
+        _, binary = cv2.threshold(gray, roi_threshold, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(binary) < 0.02 * binary.size:
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Morphology: close then vertical open
+        short_side = min(work_h, work_w)
+        k_close = max(3, int(round(short_side * 0.006)))
+        if k_close % 2 == 0:
+            k_close += 1
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close, k_close))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+
+        # Map sensitivity (0-255) to vertical kernel as ~1%-2% of height
+        if sensitivity is None:
+            vert_ratio = 0.015
+        else:
+            vert_ratio = 0.01 + 0.01 * max(0, min(255, sensitivity)) / 255.0
+        k_vert = max(7, int(round(work_h * vert_ratio)))
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_vert))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, open_kernel, iterations=1)
+
+        # Connected components
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if num <= 2:
+            return None, 0.0
+
+        # Pick two largest components (exclude background at index 0)
+        idx_sorted = np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1] + 1
+        ids = idx_sorted[:2]
+        if len(ids) < 2:
+            return None, 0.0
+
+        area1 = float(stats[ids[0], cv2.CC_STAT_AREA])
+        area2 = float(stats[ids[1], cv2.CC_STAT_AREA])
+
+        # Masks for two largest components
+        mask1 = (labels == ids[0])
+        mask2 = (labels == ids[1])
+
+        # Ensure left/right assignment by mean x position
+        xs1 = np.where(mask1)[1]
+        xs2 = np.where(mask2)[1]
+        if xs1.size == 0 or xs2.size == 0:
+            return None, 0.0
+        if xs1.mean() > xs2.mean():
+            mask1, mask2 = mask2, mask1
+            area1, area2 = area2, area1
+
+        # Validate side-by-side via vertical overlap
+        rows1 = np.where(mask1.any(axis=1))[0]
+        rows2 = np.where(mask2.any(axis=1))[0]
+        if rows1.size == 0 or rows2.size == 0:
+            return None, 0.0
+        y1_min, y1_max = rows1[0], rows1[-1]
+        y2_min, y2_max = rows2[0], rows2[-1]
+        v_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min) + 1)
+        min_h = float(min(y1_max - y1_min + 1, y2_max - y2_min + 1))
+        if min_h <= 0:
+            return None, 0.0
+        v_ratio = v_overlap / min_h
+        if v_ratio < 0.5:
+            return None, 0.0
+
+        # Row-wise facing edges using vectorized scans
+        # Rightmost x of left page per row
+        mask1_any = mask1.any(axis=1)
+        rev1 = np.flip(mask1, axis=1)
+        idx_from_right = np.argmax(rev1, axis=1)
+        xL_all = work_w - idx_from_right - 1
+        xL_all[~mask1_any] = -1
+
+        # Leftmost x of right page per row
+        mask2_any = mask2.any(axis=1)
+        idx_from_left = np.argmax(mask2, axis=1)
+        # If a row has no True, argmax returns 0; invalidate using mask
+        xR_all = idx_from_left
+        xR_all[~mask2_any] = -1
+
+        rows = np.arange(work_h)
+        valid = (xL_all >= 0) & (xR_all >= 0) & (xR_all > xL_all)
+        if not np.any(valid):
+            return None, 0.0
+
+        y_samples = rows[valid].astype(np.float32)
+        x_gap = (xR_all[valid] - xL_all[valid]).astype(np.float32)
+        x_mid = (xR_all[valid] + xL_all[valid]).astype(np.float32) * 0.5
+
+        # Robust least squares for x = m*y + b
+        A = np.vstack([y_samples, np.ones_like(y_samples)]).T
+        m, b = np.linalg.lstsq(A, x_mid, rcond=None)[0]
+
+        # Clamp angle from vertical
+        angle_from_vertical = math.degrees(math.atan(abs(m)))
+        if angle_from_vertical > angle_max_deg:
+            m = math.tan(math.radians(angle_max_deg)) * (1 if m >= 0 else -1)
+            b = float(np.mean(x_mid - m * y_samples))
+
+        # Build endpoints at this scale
+        y1 = 0
+        y2 = work_h - 1
+        x1 = int(round(m * y1 + b))
+        x2 = int(round(m * y2 + b))
+        x1 = max(0, min(work_w - 1, x1))
+        x2 = max(0, min(work_w - 1, x2))
+
+        # Confidence: coverage, area balance, normalized gap
+        coverage = float(np.count_nonzero(valid)) / float(work_h)
+        area_balance = float(min(area1, area2)) / float(max(area1, area2))
+        gap_med = float(np.median(x_gap)) / float(max(1, work_w))
+        gap_norm = max(0.0, min(1.0, gap_med / 0.15))  # 15% width -> strong gap
+        confidence = (
+            0.5 * coverage +
+            0.2 * area_balance +
+            0.3 * gap_norm
+        )
+        confidence = max(0.0, min(1.0, confidence))
+
+        # Scale back to original image coordinates if needed
+        if scale != 1.0:
+            x1 = int(round(x1 / scale))
+            y1 = int(round(y1 / scale))
+            x2 = int(round(x2 / scale))
+            y2 = int(round(y2 / scale))
+
+        return (x1, y1, x2, y2), confidence
+
+    except Exception as e:
+        logger.error(f"Error in two-pages seam detection: {e}")
+        return None, 0.0
+
+
+def detect_seam_by_page_border(
+    image: np.ndarray,
+    roi_threshold: int,
+    margin: int = 20,
+    scale_width: int = 1200
+) -> Tuple[Optional[Tuple[int, int, int, int]], float]:
+    """
+    Detect seam by finding one page and using its inner border nearest image center.
+
+    Approach:
+    - Downscale to fixed working width for speed.
+    - Threshold to white-on-black using ROI threshold (Otsu fallback).
+    - Morphology: square close (fills text holes), vertical open (breaks narrow
+      white bridges in gutter).
+    - Find largest white component (one page).
+    - Get its bounding rect; choose inner border (left side if page is right of
+      center, right side if page is left of center).
+    - Compute split_x = border_x ± margin toward image center.
+    - Return vertical line at split_x and confidence based on area ratio.
+
+    Args:
+        image: BGR image as numpy array (full resolution)
+        roi_threshold: Binary threshold for page whitening (0-255)
+        margin: Pixels to shift split line toward image center (default: 20)
+        scale_width: Working width for downscale (keeps runtime bounded)
+
+    Returns:
+        (line_coords, confidence) where line_coords=(x1,y1,x2,y2) is a vertical
+        line in original image coordinates, or (None, 0.0) if not detected.
+    """
+    try:
+        if image is None or image.size == 0:
+            return None, 0.0
+
+        # Downscale for speed
+        h0, w0 = image.shape[:2]
+        if w0 > scale_width:
+            scale = scale_width / float(w0)
+            work_w = int(round(w0 * scale))
+            work_h = int(round(h0 * scale))
+            work_img = cv2.resize(image, (work_w, work_h), interpolation=cv2.INTER_AREA)
+        else:
+            scale = 1.0
+            work_img = image
+            work_h, work_w = h0, w0
+
+        # Grayscale + optional CLAHE for microfilm contrast
+        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+        except Exception:
+            pass
+
+        # Threshold; Otsu fallback if very few white pixels
+        _, binary = cv2.threshold(gray, roi_threshold, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(binary) < 0.02 * binary.size:
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Morphology: close then vertical open
+        short_side = min(work_h, work_w)
+        k_close = max(3, int(round(short_side * 0.006)))
+        if k_close % 2 == 0:
+            k_close += 1
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close, k_close))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+
+        # Vertical open to break thin white bridges in gutter
+        vert_ratio = 0.015  # ~1.5% of height
+        k_vert = max(7, int(round(work_h * vert_ratio)))
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_vert))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, open_kernel, iterations=1)
+
+        # Connected components - find largest (one page)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if num <= 1:
+            return None, 0.0
+
+        # Get largest component (exclude background at index 0)
+        idx_sorted = np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1] + 1
+        largest_id = idx_sorted[0]
+        area = float(stats[largest_id, cv2.CC_STAT_AREA])
+
+        # Get bounding rectangle
+        x = int(stats[largest_id, cv2.CC_STAT_LEFT])
+        y = int(stats[largest_id, cv2.CC_STAT_TOP])
+        w = int(stats[largest_id, cv2.CC_STAT_WIDTH])
+        h = int(stats[largest_id, cv2.CC_STAT_HEIGHT])
+
+        # Determine which border is closer to image center
+        center_x = work_w / 2.0
+        page_center_x = x + w / 2.0
+
+        # Choose inner border: if page is left of center, use right border; if right, use left border
+        if page_center_x < center_x:
+            # Page is on left, use right border (x + w)
+            border_x = x + w
+            # Shift margin pixels toward center (to the right)
+            split_x = border_x + margin
+        else:
+            # Page is on right, use left border (x)
+            border_x = x
+            # Shift margin pixels toward center (to the left)
+            split_x = border_x - margin
+
+        # Clamp to image bounds
+        split_x = max(0, min(work_w - 1, int(round(split_x))))
+
+        # Scale back to original image coordinates if needed
+        if scale != 1.0:
+            split_x = int(round(split_x / scale))
+
+        # Build vertical line coordinates
+        x1 = split_x
+        y1 = 0
+        x2 = split_x
+        y2 = h0 - 1
+
+        # Confidence: area ratio and distance from center
+        image_area = float(work_w * work_h)
+        area_ratio = area / image_area if image_area > 0 else 0.0
+        # Distance from center (normalized) - closer to center is better
+        center_dist = abs(page_center_x - center_x) / (work_w / 2.0) if work_w > 0 else 1.0
+        center_bias = 1.0 - min(center_dist, 1.0)
+
+        confidence = (
+            0.7 * min(1.0, area_ratio / 0.3) +  # Area ratio (expect ~30% for one page)
+            0.3 * center_bias  # Center bias
+        )
+        confidence = max(0.0, min(1.0, confidence))
+
+        return (x1, y1, x2, y2), confidence
+
+    except Exception as e:
+        logger.error(f"Error in page-border seam detection: {e}")
+        return None, 0.0
 
 
 def compute_document_crop_rect(

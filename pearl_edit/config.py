@@ -36,6 +36,7 @@ class AppSettings:
     suppress_all_images_warning: bool = False
     seam_threshold: int = 140
     seam_roi_threshold: int = 170
+    seam_margin: int = 20
     seam_confidence_min: float = 0.55
     seam_angle_max_deg: float = 20.0
     seam_min_length_ratio: float = 0.6

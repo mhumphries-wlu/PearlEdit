@@ -1,5 +1,6 @@
 """Threshold adjustment dialog for auto-crop."""
 import cv2
+import numpy as np
 import tkinter as tk
 from tkinter import messagebox, ttk
 from pathlib import Path
@@ -121,21 +122,54 @@ class ThresholdAdjuster(tk.Toplevel):
         main_frame.columnconfigure(1, weight=1)
     
     def update_preview(self):
-        """Update preview image with current threshold and margin (shared logic)."""
+        """Update preview image with current threshold and margin."""
         # Convert to grayscale
         gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
 
         # Create preview image
         preview = self.original_image.copy()
 
-        # Compute crop rectangle using the same helper as runtime
         threshold = self.threshold_var.get()
-        margin = self.margin_var.get() if self.mode == 'crop' else 0
-        rect = compute_document_crop_rect(gray, threshold, margin)
-
-        if rect is not None and self.mode == 'crop':
-            x, y, w, h = rect
-            cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 0, 255), 2)
+        
+        if self.mode == 'crop':
+            # Crop mode: use compute_document_crop_rect helper
+            margin = self.margin_var.get()
+            rect = compute_document_crop_rect(gray, threshold, margin)
+            
+            if rect is not None:
+                x, y, w, h = rect
+                cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 0, 255), 2)
+        else:
+            # Straighten mode: use edge-finding logic (threshold -> contours -> minAreaRect)
+            # Apply threshold
+            _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+            
+            # Optional: Apply slight morphology to stabilize contours (same as auto_straighten)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+            
+            # Find contours
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                # Find the largest contour
+                largest_contour = max(contours, key=cv2.contourArea)
+                
+                # Check if contour is large enough (at least 1% of image area)
+                height, width = self.original_image.shape[:2]
+                min_area = (width * height) * 0.01
+                
+                if cv2.contourArea(largest_contour) >= min_area:
+                    # Draw the largest contour (green outline)
+                    cv2.drawContours(preview, [largest_contour], -1, (0, 255, 0), 2)
+                    
+                    # Get minimum area rectangle to show the dominant edge
+                    rect = cv2.minAreaRect(largest_contour)
+                    box = cv2.boxPoints(rect)
+                    box = np.int0(box)
+                    
+                    # Draw the rotated rectangle (blue) to indicate the dominant edge
+                    cv2.drawContours(preview, [box], 0, (255, 0, 0), 2)
         
         # Resize for preview
         preview = cv2.resize(preview, (self.preview_width, self.preview_height))

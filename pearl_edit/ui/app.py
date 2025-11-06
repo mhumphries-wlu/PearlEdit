@@ -483,18 +483,19 @@ class PearlEditApp(BaseTk):
         )
         self.split_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        def autosplit_finder_wrapper():
-            self.clear_button_depressed()
-            self.update_status_display("Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line")
-            self.auto_split_current_finder()
-        self.autosplit_finder_button = self.create_button_with_hint(
-            split_buttons,
-            self.split_icon,  # Reuse split icon for now
-            autosplit_finder_wrapper,
-            "Auto Split (Finder)\nAutomatically detect book seam\nAdjust threshold in dialog\nClick Apply Split to split",
-            "Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line"
-        )
-        self.autosplit_finder_button.pack(side=tk.LEFT, padx=5, pady=2)
+        # Autosplit button hidden per user request
+        # def autosplit_finder_wrapper():
+        #     self.clear_button_depressed()
+        #     self.update_status_display("Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line")
+        #     self.auto_split_current_finder()
+        # self.autosplit_finder_button = self.create_button_with_hint(
+        #     split_buttons,
+        #     self.split_icon,  # Reuse split icon for now
+        #     autosplit_finder_wrapper,
+        #     "Auto Split (Finder)\nAutomatically detect book seam\nAdjust threshold in dialog\nClick Apply Split to split",
+        #     "Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line"
+        # )
+        # self.autosplit_finder_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Label for Split
         split_label = tk.Label(
@@ -918,6 +919,15 @@ class PearlEditApp(BaseTk):
             if self.batch_process.get() != is_batch_processing:
                 self.batch_process.set(is_batch_processing)
                 self.settings.batch_process = is_batch_processing
+                
+                # If turning batch processing ON, turn OFF apply to all
+                if is_batch_processing and self.apply_to_all.get():
+                    self.apply_to_all.set(False)
+                    self.update_apply_to_all_icon()
+                    # Sync with menu
+                    if hasattr(self, 'apply_to_var'):
+                        self.apply_to_var.set("Current Image")
+                
                 self.update_batch_process_icon()
                 # Update status display
                 if is_batch_processing:
@@ -949,6 +959,16 @@ class PearlEditApp(BaseTk):
             is_all = (mode == "All Images")
             if self.apply_to_all.get() != is_all:
                 self.apply_to_all.set(is_all)
+                
+                # If turning apply to all ON, turn OFF batch processing
+                if is_all and self.batch_process.get():
+                    self.batch_process.set(False)
+                    self.settings.batch_process = False
+                    self.update_batch_process_icon()
+                    # Sync with menu
+                    if hasattr(self, 'processing_mode_var'):
+                        self.processing_mode_var.set("Sequential")
+                
                 self.update_apply_to_all_icon()
                 # Update status display
                 if is_all:
@@ -988,7 +1008,8 @@ class PearlEditApp(BaseTk):
         # Cursor bindings
         self.bind("<Control-h>", lambda e: self.switch_to_horizontal())
         self.bind("<Control-v>", lambda e: self.switch_to_vertical())
-        self.bind("<Control-a>", lambda e: self.toggle_auto_split())
+        # Autosplit keyboard shortcut removed per user request
+        # self.bind("<Control-a>", lambda e: self.toggle_auto_split())
         
         # Straighten image
         self.bind("<Control-l>", lambda e: self.manual_straighten())
@@ -1589,8 +1610,18 @@ class PearlEditApp(BaseTk):
     
     def toggle_batch_process(self):
         """Toggle batch process mode."""
-        self.batch_process.set(not self.batch_process.get())
-        self.settings.batch_process = self.batch_process.get()
+        new_value = not self.batch_process.get()
+        self.batch_process.set(new_value)
+        self.settings.batch_process = new_value
+        
+        # If turning batch processing ON, turn OFF apply to all
+        if new_value and self.apply_to_all.get():
+            self.apply_to_all.set(False)
+            self.update_apply_to_all_icon()
+            # Sync with menu
+            if hasattr(self, 'apply_to_var'):
+                self.apply_to_var.set("Current Image")
+        
         self.update_batch_process_icon()
         # Sync with menu
         if hasattr(self, 'processing_mode_var'):
@@ -1610,7 +1641,18 @@ class PearlEditApp(BaseTk):
     
     def toggle_apply_to_all(self):
         """Toggle apply to all images mode."""
-        self.apply_to_all.set(not self.apply_to_all.get())
+        new_value = not self.apply_to_all.get()
+        self.apply_to_all.set(new_value)
+        
+        # If turning apply to all ON, turn OFF batch processing
+        if new_value and self.batch_process.get():
+            self.batch_process.set(False)
+            self.settings.batch_process = False
+            self.update_batch_process_icon()
+            # Sync with menu
+            if hasattr(self, 'processing_mode_var'):
+                self.processing_mode_var.set("Sequential")
+        
         self.update_apply_to_all_icon()
         # Sync with menu
         if hasattr(self, 'apply_to_var'):
@@ -2390,7 +2432,7 @@ class PearlEditApp(BaseTk):
         
         def process_all():
             import cv2
-            from ..image_ops import detect_gutter_line_dark_path, detect_gutter_line_profile, detect_gutter_line
+            from ..image_ops import detect_seam_by_page_border
             
             try:
                 processed_count = 0
@@ -2411,38 +2453,16 @@ class PearlEditApp(BaseTk):
                         skipped_count += 1
                         continue
                     
-                    # Detect seam with current settings using dark-path method
+                    # Detect seam with current settings using page border method
                     settings = self.service.settings
                     roi_threshold = getattr(settings, 'seam_roi_threshold', 170)
+                    margin = getattr(settings, 'seam_margin', 20)
                     
-                    line_coords, confidence = detect_gutter_line_dark_path(
+                    line_coords, confidence = detect_seam_by_page_border(
                         image,
                         roi_threshold,
-                        settings.seam_threshold,  # Used as sensitivity
-                        settings.seam_angle_max_deg,
-                        settings.seam_min_length_ratio
+                        margin
                     )
-                    
-                    # Fallback to profile method if dark-path fails or confidence is very low
-                    if not line_coords or confidence < 0.1:
-                        logger.debug(f"Dark-path method failed, trying profile method for {image_path.name}")
-                        line_coords, confidence = detect_gutter_line_profile(
-                            image,
-                            roi_threshold,
-                            settings.seam_threshold,
-                            settings.seam_angle_max_deg,
-                            settings.seam_min_length_ratio
-                        )
-                        
-                        # Fallback to original Hough method if profile method also fails
-                        if not line_coords or confidence < 0.1:
-                            logger.debug(f"Profile method also failed, trying Hough fallback for {image_path.name}")
-                            line_coords, confidence = detect_gutter_line(
-                                image,
-                                settings.seam_threshold,
-                                settings.seam_angle_max_deg,
-                                settings.seam_min_length_ratio
-                            )
                     
                     # If confidence is high enough, apply automatically
                     if line_coords and confidence >= settings.seam_confidence_min:

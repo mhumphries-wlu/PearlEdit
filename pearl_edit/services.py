@@ -1131,10 +1131,29 @@ class ImageService:
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save all current images
-            for record in self.state.images:
+            # Get folder name from output directory and sanitize it
+            folder_name = output_dir.name
+            # Sanitize folder name for use in filenames (remove invalid characters)
+            safe_folder_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in folder_name)
+            # Remove leading/trailing underscores and ensure it's not empty
+            safe_folder_name = safe_folder_name.strip('_') or 'images'
+            
+            # Save all current images with numbered suffixes
+            for index, record in enumerate(self.state.images, start=1):
                 image_path = record.current_image_path
-                output_path = output_dir / image_path.name
+                # Get file extension from original image
+                file_ext = image_path.suffix or '.jpg'
+                # Generate filename: folder_name_001.ext, folder_name_002.ext, etc.
+                output_filename = f"{safe_folder_name}_{index:03d}{file_ext}"
+                output_path = output_dir / output_filename
+                
+                # Handle name collisions (shouldn't happen with sequential numbering, but safety check)
+                counter = 1
+                while output_path.exists():
+                    output_filename = f"{safe_folder_name}_{index:03d}_{counter}{file_ext}"
+                    output_path = output_dir / output_filename
+                    counter += 1
+                
                 copy_image(image_path, output_path)
             
             self.state.mark_saved()

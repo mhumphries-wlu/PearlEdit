@@ -9,12 +9,7 @@ from typing import Optional, Tuple, Callable
 import logging
 
 from ..image_ops import (
-    detect_gutter_line, 
-    detect_gutter_line_profile,
-    detect_gutter_line_dark_path,
-    find_optimal_seam_threshold,
-    find_optimal_seam_params,
-    find_optimal_seam_params_dark,
+    detect_seam_by_page_border,
     compute_largest_white_roi,
     ImageProcessingError
 )
@@ -50,9 +45,7 @@ class SeamFinderDialog(tk.Toplevel):
         # Get ROI threshold from settings (with backward compatibility)
         roi_threshold = getattr(settings, 'seam_roi_threshold', 170)
         self.roi_threshold_var = tk.IntVar(value=roi_threshold)
-        self.sensitivity_var = tk.IntVar(value=settings.seam_threshold)
-        self.angle_max_deg = settings.seam_angle_max_deg
-        self.min_length_ratio = settings.seam_min_length_ratio
+        self.margin_var = tk.IntVar(value=getattr(settings, 'seam_margin', 20))
         
         # Load the image
         self.original_image = cv2.imread(str(image_path))
@@ -75,25 +68,6 @@ class SeamFinderDialog(tk.Toplevel):
         # Calculate preview dimensions
         self.preview_width = int(self.width * self.preview_scale)
         self.preview_height = int(self.height * self.preview_scale)
-        
-        # Find optimal parameters on initialization using dark-path method
-        try:
-            optimal_roi_threshold, optimal_sensitivity = find_optimal_seam_params_dark(
-                self.original_image,
-                self.angle_max_deg,
-                self.min_length_ratio
-            )
-            self.roi_threshold_var.set(optimal_roi_threshold)
-            self.sensitivity_var.set(optimal_sensitivity)
-            settings.seam_roi_threshold = optimal_roi_threshold
-            settings.seam_threshold = optimal_sensitivity
-            logger.info(f"Found optimal dark-path seam params: ROI={optimal_roi_threshold}, Sensitivity={optimal_sensitivity} for {image_path.name}")
-        except ImageProcessingError as e:
-            logger.warning(f"Could not find optimal params for {image_path.name}: {e}")
-            # Use defaults from settings
-        except Exception as e:
-            logger.error(f"Unexpected error finding optimal params for {image_path.name}: {e}")
-            # Use defaults from settings
         
         # Current detection result
         self.current_line_coords = None
@@ -134,17 +108,17 @@ class SeamFinderDialog(tk.Toplevel):
         )
         roi_threshold_scale.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
         
-        # Seam Sensitivity control
-        ttk.Label(main_frame, text="Seam Sensitivity:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        sensitivity_scale = ttk.Scale(
+        # Split Margin control
+        ttk.Label(main_frame, text="Split Margin:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        margin_scale = ttk.Scale(
             main_frame,
             from_=0,
-            to=255,
+            to=100,
             orient=tk.HORIZONTAL,
-            variable=self.sensitivity_var,
+            variable=self.margin_var,
             command=lambda _: self.update_preview()
         )
-        sensitivity_scale.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
+        margin_scale.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
         
         # Confidence label
         self.confidence_label = ttk.Label(
@@ -158,7 +132,7 @@ class SeamFinderDialog(tk.Toplevel):
         info_label = ttk.Label(
             main_frame,
             text="Adjust ROI Threshold to find the largest white mass (document area).\n"
-                 "Adjust Seam Sensitivity to detect the dark center seam (black/grey gutter).\n"
+                 "Adjust Split Margin to shift the split line away from the page edge.\n"
                  "Low confidence pages will prompt for review during batch processing.",
             font=("Arial", 8),
             foreground="gray",
@@ -186,24 +160,21 @@ class SeamFinderDialog(tk.Toplevel):
         try:
             # Convert to RGB for display
             preview = cv2.cvtColor(self.original_image.copy(), cv2.COLOR_BGR2RGB)
-            
-            # Detect seam line using dark-path method
+
             roi_threshold = self.roi_threshold_var.get()
-            sensitivity = self.sensitivity_var.get()
-            
+            margin = self.margin_var.get()
+
             # Compute ROI for overlay
             gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
             roi_x, roi_y, roi_w, roi_h = compute_largest_white_roi(gray, roi_threshold, margin=8)
             roi_rect = (roi_x, roi_y, roi_w, roi_h)
             self.current_roi = roi_rect
-            
-            # Detect seam using dark-path method
-            line_coords, confidence = detect_gutter_line_dark_path(
+
+            # Detect seam using page border method
+            line_coords, confidence = detect_seam_by_page_border(
                 self.original_image,
                 roi_threshold,
-                sensitivity,
-                self.angle_max_deg,
-                self.min_length_ratio
+                margin
             )
             
             self.current_line_coords = line_coords
@@ -304,22 +275,22 @@ class SeamFinderDialog(tk.Toplevel):
                 )
             except tk.TclError:
                 pass  # Window was destroyed
-            logger.warning(f"No seam detected for {self.image_path.name} at ROI threshold {self.roi_threshold_var.get()}, sensitivity {self.sensitivity_var.get()}")
+            logger.warning(f"No seam detected for {self.image_path.name} at ROI threshold {self.roi_threshold_var.get()}, margin {self.margin_var.get()}")
             return
         
         roi_threshold = self.roi_threshold_var.get()
-        sensitivity = self.sensitivity_var.get()
+        margin = self.margin_var.get()
         
         try:
             # Update settings
             self.service.settings.seam_roi_threshold = roi_threshold
-            self.service.settings.seam_threshold = sensitivity
+            self.service.settings.seam_margin = margin
             
-            logger.info(f"Applying split for {self.image_path.name} with ROI threshold {roi_threshold}, sensitivity {sensitivity}, confidence {self.current_confidence:.2f}")
+            logger.info(f"Applying split for {self.image_path.name} with ROI threshold {roi_threshold}, margin {margin}, confidence {self.current_confidence:.2f}")
             
             # Call callback if provided
             if self.on_apply:
-                self.on_apply(self.current_line_coords, sensitivity)
+                self.on_apply(self.current_line_coords, margin)
             
             # Close the window
             try:

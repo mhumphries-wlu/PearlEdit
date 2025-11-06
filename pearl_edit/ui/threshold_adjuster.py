@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from pathlib import Path
 from PIL import Image, ImageTk
+from pearl_edit.image_ops import compute_document_crop_rect
 
 
 class ThresholdAdjuster(tk.Toplevel):
@@ -120,38 +121,21 @@ class ThresholdAdjuster(tk.Toplevel):
         main_frame.columnconfigure(1, weight=1)
     
     def update_preview(self):
-        """Update preview image with current threshold and margin."""
+        """Update preview image with current threshold and margin (shared logic)."""
         # Convert to grayscale
         gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply threshold
-        _, binary = cv2.threshold(gray, self.threshold_var.get(), 255, cv2.THRESH_BINARY)
-        
-        # Find contours
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         # Create preview image
         preview = self.original_image.copy()
-        
-        if contours:
-            # Find the largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
-            
-            # Draw the contour (green outline) - always shown
-            cv2.drawContours(preview, [largest_contour], -1, (0, 255, 0), 2)
-            
-            # Draw crop rectangle (red) - only for crop mode
-            if self.mode == 'crop':
-                # Get bounding rectangle with margin
-                x, y, w, h = cv2.boundingRect(largest_contour)
-                margin = self.margin_var.get()
-                x = max(0, x - margin)
-                y = max(0, y - margin)
-                w = min(self.width - x, w + 2 * margin)
-                h = min(self.height - y, h + 2 * margin)
-                
-                # Draw crop rectangle
-                cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+        # Compute crop rectangle using the same helper as runtime
+        threshold = self.threshold_var.get()
+        margin = self.margin_var.get() if self.mode == 'crop' else 0
+        rect = compute_document_crop_rect(gray, threshold, margin)
+
+        if rect is not None and self.mode == 'crop':
+            x, y, w, h = rect
+            cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 0, 255), 2)
         
         # Resize for preview
         preview = cv2.resize(preview, (self.preview_width, self.preview_height))

@@ -16,7 +16,12 @@ class ImageProcessingError(Exception):
 
 def auto_crop(image_path: str, threshold: int = 127, margin: int = 10) -> bool:
     """
-    Crop image to largest white area using threshold detection.
+    Crop the image to the detected document region using a robust pipeline.
+
+    This uses the shared `compute_document_crop_rect` helper so behavior matches
+    the preview. The helper performs thresholding, light morphology, border
+    suppression, contour filtering, and (optionally) unions two side‑by‑side
+    page regions.
     
     Args:
         image_path: Path to the image file
@@ -33,40 +38,21 @@ def auto_crop(image_path: str, threshold: int = 127, margin: int = 10) -> bool:
         image = cv2.imread(image_path)
         if image is None:
             raise ImageProcessingError(f"Failed to load image: {image_path}")
-            
-        height, width = image.shape[:2]
         
-        # Convert to grayscale
+        # Convert to grayscale once and delegate crop rectangle computation
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply threshold
-        _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
-        
-        # Find contours
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            logger.warning(f"No contours found in {image_path}")
+        rect = compute_document_crop_rect(gray, threshold, margin)
+        if rect is None:
+            logger.warning(f"Auto-crop: no valid document region found for {image_path}")
             return False
-            
-        # Find the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        # Get bounding rectangle with margin
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        x = max(0, x - margin)
-        y = max(0, y - margin)
-        w = min(width - x, w + 2 * margin)
-        h = min(height - y, h + 2 * margin)
-        
-        # Crop the image
+
+        x, y, w, h = rect
         cropped = image[y:y+h, x:x+w]
-        
-        # Save the cropped image
         cv2.imwrite(image_path, cropped)
-        
         return True
         
+    except ImageProcessingError:
+        raise
     except Exception as e:
         logger.error(f"Error during auto-crop: {e}")
         raise ImageProcessingError(f"Error during auto-crop: {str(e)}") from e
@@ -902,6 +888,144 @@ def compute_largest_white_roi(
             return (0, 0, width, height)
         return (0, 0, 0, 0)
 
+
+def compute_document_crop_rect(
+    gray: np.ndarray,
+    threshold: int,
+    margin: int,
+    *,
+    min_area_ratio: float = 0.03,
+    border_pct: Tuple[float, float] = (0.03, 0.01),
+    union_two: bool = True
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Compute a robust document crop rectangle from a grayscale image.
+
+    Pipeline:
+    1) Global threshold to white-on-black; if it yields no valid component,
+       fall back to Otsu threshold.
+    2) Suppress thin outer borders (left/right and top/bottom percentages) to
+       remove bright microfilm labels and sprocket holes.
+    3) Morphological close with a small kernel to connect text islands.
+    4) Find external contours and filter by a minimum image-area ratio.
+    5) If two large components are side-by-side with strong vertical overlap,
+       return the union bounding box; otherwise return the largest.
+
+    Args:
+        gray: Grayscale image array.
+        threshold: Threshold in [0, 255] used for the primary binarization.
+        margin: Pixels to expand around the detected rectangle.
+        min_area_ratio: Minimum contour area as a fraction of image area.
+        border_pct: (horizontal_pct, vertical_pct) border to suppress.
+        union_two: When True, union two side-by-side page rectangles.
+
+    Returns:
+        (x, y, w, h) rectangle in image coordinates, or None if not found.
+    """
+    try:
+        if gray is None or gray.size == 0:
+            return None
+
+        img_height, img_width = gray.shape[:2]
+        image_area = float(img_width * img_height)
+
+        # Determine morphology kernel size based on image size
+        short_side = min(img_width, img_height)
+        kernel_size = max(3, int(round(short_side * 0.006)))
+        kernel_size = min(9, kernel_size)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+
+        hor_border = max(0, int(img_width * max(0.0, border_pct[0])))
+        ver_border = max(0, int(img_height * max(0.0, border_pct[1])))
+
+        def make_binary(thresh_value: int, use_otsu: bool = False) -> np.ndarray:
+            if use_otsu:
+                _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            else:
+                _, bin_img = cv2.threshold(gray, thresh_value, 255, cv2.THRESH_BINARY)
+
+            # Suppress borders to ignore edge labels/sprocket holes
+            if hor_border > 0:
+                bin_img[:, :hor_border] = 0
+                bin_img[:, img_width - hor_border:img_width] = 0
+            if ver_border > 0:
+                bin_img[:ver_border, :] = 0
+                bin_img[img_height - ver_border:img_height, :] = 0
+
+            # Connect nearby white regions
+            bin_img = cv2.morphologyEx(bin_img, cv2.MORPH_CLOSE, kernel, iterations=1)
+            return bin_img
+
+        def find_candidate_rects(bin_img: np.ndarray) -> list:
+            contours, _ = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            candidates = []
+            if contours:
+                min_area = image_area * min_area_ratio
+                for c in contours:
+                    area = cv2.contourArea(c)
+                    if area < min_area:
+                        continue
+                    x, y, w, h = cv2.boundingRect(c)
+                    candidates.append((x, y, w, h, area))
+            return candidates
+
+        # First pass: provided threshold
+        binary = make_binary(threshold, use_otsu=False)
+        rects = find_candidate_rects(binary)
+
+        # Fallback: Otsu if nothing valid
+        if not rects:
+            binary = make_binary(0, use_otsu=True)
+            rects = find_candidate_rects(binary)
+            if not rects:
+                return None
+
+        # Sort by area descending
+        rects.sort(key=lambda r: r[4], reverse=True)
+
+        def union_if_two_pages(r1: Tuple[int, int, int, int, float], r2: Tuple[int, int, int, int, float]) -> Optional[Tuple[int, int, int, int]]:
+            x1, y1, w1, h1, _ = r1
+            x2, y2, w2, h2, _ = r2
+            # Vertical overlap fraction relative to smaller height
+            top = max(y1, y2)
+            bottom = min(y1 + h1, y2 + h2)
+            v_overlap = max(0, bottom - top)
+            v_overlap_ratio = v_overlap / max(1.0, float(min(h1, h2)))
+
+            # Horizontal overlap fraction
+            left = max(x1, x2)
+            right = min(x1 + w1, x2 + w2)
+            h_overlap = max(0, right - left)
+            h_overlap_ratio = h_overlap / max(1.0, float(min(w1, w2)))
+
+            # Consider side-by-side when vertical overlap is strong and horizontal overlap is small
+            if v_overlap_ratio >= 0.5 and h_overlap_ratio <= 0.3:
+                x = min(x1, x2)
+                y = min(y1, y2)
+                w = max(x1 + w1, x2 + w2) - x
+                h = max(y1 + h1, y2 + h2) - y
+                return (x, y, w, h)
+            return None
+
+        # Choose rectangle
+        x, y, w, h = rects[0][0], rects[0][1], rects[0][2], rects[0][3]
+        if union_two and len(rects) >= 2:
+            two_union = union_if_two_pages(rects[0], rects[1])
+            if two_union is not None:
+                x, y, w, h = two_union
+
+        # Expand by margin and clamp
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        w = min(img_width - x, w + 2 * margin)
+        h = min(img_height - y, h + 2 * margin)
+        return (x, y, w, h)
+
+    except Exception as e:
+        logger.error(f"Error computing document crop rect: {e}")
+        return None
 
 def detect_gutter_line_profile(
     image: np.ndarray,

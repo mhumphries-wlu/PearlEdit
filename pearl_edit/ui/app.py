@@ -143,6 +143,7 @@ class PearlEditApp(BaseTk):
         self.straighten_start = None
         self.straighten_line = None
         self.guide_line = None
+        self.active_tool_button = None  # Track which tool button is currently depressed
         
         # Initialize UI
         self.setup_window()
@@ -262,9 +263,13 @@ class PearlEditApp(BaseTk):
         self.reset_icon = self.load_icon(icons_dir / "new.png", size=(24, 24))
         self.split_icon = self.load_icon(icons_dir / "split.png", size=(24, 24))
         self.crop_icon = self.load_icon(icons_dir / "crop.png", size=(24, 24))
+        self.crop_on_icon = self.load_icon(icons_dir / "crop-on.png", size=(24, 24))
         self.autocrop_icon = self.load_icon(icons_dir / "autocrop.png", size=(24, 24))
+        self.autocrop_on_icon = self.load_icon(icons_dir / "autocrop-on.png", size=(24, 24))
         self.straighten_icon = self.load_icon(icons_dir / "straighten.png", size=(24, 24))
+        self.straighten_on_icon = self.load_icon(icons_dir / "straighten-on.png", size=(24, 24))
         self.autostraighten_icon = self.load_icon(icons_dir / "autostraighten.png", size=(24, 24))
+        self.autostraighten_on_icon = self.load_icon(icons_dir / "autostraighten-on.png", size=(24, 24))
         
         # Navigation icons
         self.start_icon = self.load_icon(icons_dir / "start.png", size=(24, 24))
@@ -339,31 +344,6 @@ class PearlEditApp(BaseTk):
         )
         self.save_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Delete buttons in File Operations section
-        def delete_wrapper():
-            self.update_status_display("Delete Tool: Deletes the current image | Use Delete Range to delete multiple images")
-            self.delete_current()
-        self.delete_button = self.create_button_with_hint(
-            file_ops_buttons,
-            self.delete_icon,
-            delete_wrapper,
-            "Delete Image\nDelete the current image",
-            "Delete Tool: Deletes the current image | Use Delete Range to delete multiple images"
-        )
-        self.delete_button.pack(side=tk.LEFT, padx=5, pady=2)
-        
-        def delete_range_wrapper():
-            self.update_status_display("Delete Range Tool: Opens dialog to delete multiple images | Select range and deletion mode")
-            self.delete_range_dialog()
-        self.delete_range_button = self.create_button_with_hint(
-            file_ops_buttons,
-            self.delete_multi_icon,
-            delete_range_wrapper,
-            "Delete Range\nDelete multiple images\nOpens selection dialog",
-            "Delete Range Tool: Opens dialog to delete multiple images | Select range and deletion mode"
-        )
-        self.delete_range_button.pack(side=tk.LEFT, padx=5, pady=2)
-        
         # Label for File Operations
         file_ops_label = tk.Label(
             file_ops_section,
@@ -373,7 +353,53 @@ class PearlEditApp(BaseTk):
         )
         file_ops_label.pack(side=tk.BOTTOM, pady=(0, 2))
         
-        # Divider after File Operations
+        # Divider between File Operations and Delete buttons
+        separator_file_ops = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
+        separator_file_ops.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        
+        # Delete section
+        delete_section = tk.Frame(self.toolbar_frame)
+        delete_section.pack(side=tk.LEFT, padx=2)
+        
+        delete_buttons = tk.Frame(delete_section)
+        delete_buttons.pack(side=tk.TOP, pady=2)
+        
+        # Delete button
+        def delete_wrapper():
+            self.update_status_display("Delete Tool: Deletes the current image | Use Delete Range to delete multiple images")
+            self.delete_current()
+        self.delete_button = self.create_button_with_hint(
+            delete_buttons,
+            self.delete_icon,
+            delete_wrapper,
+            "Delete Image\nDelete the current image",
+            "Delete Tool: Deletes the current image | Use Delete Range to delete multiple images"
+        )
+        self.delete_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Delete Range button
+        def delete_range_wrapper():
+            self.update_status_display("Delete Range Tool: Opens dialog to delete multiple images | Select range and deletion mode")
+            self.delete_range_dialog()
+        self.delete_range_button = self.create_button_with_hint(
+            delete_buttons,
+            self.delete_multi_icon,
+            delete_range_wrapper,
+            "Delete Range\nDelete multiple images\nOpens selection dialog",
+            "Delete Range Tool: Opens dialog to delete multiple images | Select range and deletion mode"
+        )
+        self.delete_range_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Label for Delete section
+        delete_label = tk.Label(
+            delete_section,
+            text="Delete Page",
+            font=("Arial", 7),
+            fg="gray"
+        )
+        delete_label.pack(side=tk.BOTTOM, pady=(0, 2))
+        
+        # Divider after Delete section
         separator = tk.Frame(self.toolbar_frame, width=2, relief=tk.SUNKEN, borderwidth=1)
         separator.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
         
@@ -445,6 +471,7 @@ class PearlEditApp(BaseTk):
         split_buttons.pack(side=tk.TOP, pady=2)
         
         def split_wrapper():
+            self.clear_button_depressed()
             self.update_status_display("Split Tool: To change between Horizontal and Vertical Cursor use Ctrl+H and Ctrl+V | To rotate cursor use [ and ] | To split image, click mouse")
             self.switch_to_vertical()
         self.split_button = self.create_button_with_hint(
@@ -457,6 +484,7 @@ class PearlEditApp(BaseTk):
         self.split_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         def autosplit_finder_wrapper():
+            self.clear_button_depressed()
             self.update_status_display("Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line")
             self.auto_split_current_finder()
         self.autosplit_finder_button = self.create_button_with_hint(
@@ -488,25 +516,19 @@ class PearlEditApp(BaseTk):
         crop_buttons = tk.Frame(crop_section)
         crop_buttons.pack(side=tk.TOP, pady=2)
         
-        def crop_wrapper():
-            self.update_status_display("Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape")
-            self.activate_crop_tool()
         self.crop_button = self.create_button_with_hint(
             crop_buttons,
             self.crop_icon,
-            crop_wrapper,
+            lambda: self._crop_button_clicked(),
             "Crop Tool\nActivate crop mode\nDrag to select area\nEnter to apply, Escape to cancel\nShortcut: Ctrl+Shift+C",
             "Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape"
         )
         self.crop_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        def autocrop_wrapper():
-            self.update_status_display("Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort")
-            self.auto_crop_current()
         self.autocrop_button = self.create_button_with_hint(
             crop_buttons,
             self.autocrop_icon,
-            autocrop_wrapper,
+            lambda: self._autocrop_button_clicked(),
             "Auto Crop\nAutomatically crop image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+A",
             "Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort"
         )
@@ -532,25 +554,19 @@ class PearlEditApp(BaseTk):
         straighten_buttons = tk.Frame(straighten_section)
         straighten_buttons.pack(side=tk.TOP, pady=2)
         
-        def straighten_wrapper():
-            self.update_status_display("Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line")
-            self.manual_straighten()
         self.straighten_button = self.create_button_with_hint(
             straighten_buttons,
             self.straighten_icon,
-            straighten_wrapper,
+            lambda: self._straighten_button_clicked(),
             "Straighten Image\nDraw a line to straighten image\nClick start point, then end point\nShortcut: Ctrl+L",
             "Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line"
         )
         self.straighten_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        def autostraighten_wrapper():
-            self.update_status_display("Auto Straighten Tool: Adjust threshold slider in dialog | Click Apply to straighten image | Click Cancel to abort")
-            self.auto_straighten_current()
         self.autostraighten_button = self.create_button_with_hint(
             straighten_buttons,
             self.autostraighten_icon,
-            autostraighten_wrapper,
+            lambda: self._autostraighten_button_clicked(),
             "Auto Straighten\nAutomatically straighten image using edge detection\nAdjust threshold in dialog\nShortcut: Ctrl+Shift+L",
             "Auto Straighten Tool: Adjust threshold slider in dialog | Click Apply to straighten image | Click Cancel to abort"
         )
@@ -578,6 +594,7 @@ class PearlEditApp(BaseTk):
         
         # Rotate buttons
         def rotate_right_wrapper():
+            self.clear_button_depressed()
             self.update_status_display("Rotate Tool: Rotates image 90 degrees clockwise | Shortcut: Ctrl+] | Use Apply to All to rotate all images")
             self.rotate_image(-90)
         self.rotate_right_button = self.create_button_with_hint(
@@ -590,6 +607,7 @@ class PearlEditApp(BaseTk):
         self.rotate_right_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         def rotate_left_wrapper():
+            self.clear_button_depressed()
             self.update_status_display("Rotate Tool: Rotates image 90 degrees counter-clockwise | Shortcut: Ctrl+[ | Use Apply to All to rotate all images")
             self.rotate_image(90)
         self.rotate_left_button = self.create_button_with_hint(
@@ -765,6 +783,88 @@ class PearlEditApp(BaseTk):
         self._tooltips.append(tooltip)
         
         return button
+    
+    def set_button_depressed(self, button, on_icon):
+        """Set a button to depressed state with on icon."""
+        # If clicking the same button that's already depressed, toggle it off
+        if self.active_tool_button == button:
+            self.clear_button_depressed()
+            return False  # Return False to indicate button was toggled off
+        
+        # Clear any previously depressed button
+        self.clear_button_depressed()
+        
+        # Set new button to depressed state
+        button.config(image=on_icon, relief=tk.SUNKEN)
+        self.active_tool_button = button
+        return True  # Return True to indicate button was set to depressed
+    
+    def clear_button_depressed(self):
+        """Clear the depressed state of the active button."""
+        if self.active_tool_button:
+            # Restore normal icon and relief based on which button it is
+            if self.active_tool_button == self.crop_button:
+                self.active_tool_button.config(image=self.crop_icon, relief=tk.RAISED)
+            elif self.active_tool_button == self.autocrop_button:
+                self.active_tool_button.config(image=self.autocrop_icon, relief=tk.RAISED)
+            elif self.active_tool_button == self.straighten_button:
+                self.active_tool_button.config(image=self.straighten_icon, relief=tk.RAISED)
+            elif self.active_tool_button == self.autostraighten_button:
+                self.active_tool_button.config(image=self.autostraighten_icon, relief=tk.RAISED)
+            self.active_tool_button = None
+    
+    def _crop_button_clicked(self):
+        """Handle crop button click."""
+        # Check if button was toggled off (user clicked same button again)
+        was_set = self.set_button_depressed(self.crop_button, self.crop_on_icon)
+        if not was_set:
+            # Button was toggled off, clear modes and return to neutral state
+            self.clear_all_modes()
+            return
+        
+        self.update_status_display("Crop Tool: Drag mouse to select area | To apply crop, press Enter | To cancel, press Escape")
+        self.activate_crop_tool()
+        # activate_crop_tool uses _clear_modes_preserve_button which preserves the button state,
+        # but if it returned early (warning canceled), we need to clear the button
+        if not self.cropping:
+            # Tool wasn't activated (warning was canceled), clear button
+            self.clear_button_depressed()
+    
+    def _straighten_button_clicked(self):
+        """Handle straighten button click."""
+        # Check if button was toggled off (user clicked same button again)
+        was_set = self.set_button_depressed(self.straighten_button, self.straighten_on_icon)
+        if not was_set:
+            # Button was toggled off, clear modes and return to neutral state
+            self.clear_all_modes()
+            return
+        
+        self.update_status_display("Straighten Tool: Click first point to start line | Click second point to end line | Image will rotate to align line")
+        self.manual_straighten()
+    
+    def _autocrop_button_clicked(self):
+        """Handle autocrop button click."""
+        # Check if button was toggled off (user clicked same button again)
+        was_set = self.set_button_depressed(self.autocrop_button, self.autocrop_on_icon)
+        if not was_set:
+            # Button was toggled off, clear modes and return to neutral state
+            self.clear_all_modes()
+            return
+        
+        self.update_status_display("Auto Crop Tool: Adjust threshold and margin sliders in dialog | Click Apply to crop image | Click Cancel to abort")
+        self.auto_crop_current()
+    
+    def _autostraighten_button_clicked(self):
+        """Handle autostraighten button click."""
+        # Check if button was toggled off (user clicked same button again)
+        was_set = self.set_button_depressed(self.autostraighten_button, self.autostraighten_on_icon)
+        if not was_set:
+            # Button was toggled off, clear modes and return to neutral state
+            self.clear_all_modes()
+            return
+        
+        self.update_status_display("Auto Straighten Tool: Adjust threshold slider in dialog | Click Apply to straighten image | Click Cancel to abort")
+        self.auto_straighten_current()
     
     def create_menus(self):
         """Create menu bar."""
@@ -1637,8 +1737,42 @@ class PearlEditApp(BaseTk):
         
         return result['proceed']
     
+    def _clear_modes_preserve_button(self):
+        """Clear all active modes but preserve button state."""
+        # Reset status to default zoom/pan info when nothing is selected
+        self.update_status_display("Ready | Zoom: CTRL + Mouse Wheel | Pan: Hold SPACEBAR + Drag Mouse")
+        self.cropping = False
+        self.crop_start = None
+        self.crop_end = None
+        if self.crop_rect:
+            self.image_canvas.delete(self.crop_rect)
+            self.crop_rect = None
+        self.straightening_mode = False
+        self.straighten_start = None
+        if self.guide_line:
+            self.image_canvas.delete(self.guide_line)
+            self.guide_line = None
+        self.clear_cursor_lines()
+        self.image_canvas.config(cursor="")
+        self.image_canvas.unbind("<ButtonPress-1>")
+        self.image_canvas.unbind("<B1-Motion>")
+        self.image_canvas.unbind("<ButtonRelease-1>")
+        self.image_canvas.unbind("<Motion>")
+        self.unbind("<Return>")
+        self.unbind("<Escape>")
+        self.special_cursor_active = False
+        self.cursor_angle = 0
+        self.cursor_orientation = 'vertical'
+        self.bind("<Left>", lambda e: self.navigate_images(-1))
+        self.bind("<Right>", lambda e: self.navigate_images(1))
+        self.bind("<Control-h>", lambda e: self.switch_to_horizontal())
+        self.bind("<Control-v>", lambda e: self.switch_to_vertical())
+    
     def clear_all_modes(self):
         """Clear all active modes and reset to default state."""
+        # Clear depressed button state
+        self.clear_button_depressed()
+        
         # Reset status to default zoom/pan info when nothing is selected
         self.update_status_display("Ready | Zoom: CTRL + Mouse Wheel | Pan: Hold SPACEBAR + Drag Mouse")
         self.cropping = False
@@ -1994,7 +2128,11 @@ class PearlEditApp(BaseTk):
             self.auto_crop_all()
             return
         
+        # Track whether apply was called to avoid clearing button when dialog closes after apply
+        apply_called = {'value': False}
+        
         def apply_crop(threshold, margin):
+            apply_called['value'] = True
             try:
                 # Update settings first
                 self.service.settings.threshold = threshold
@@ -2002,6 +2140,9 @@ class PearlEditApp(BaseTk):
                 # Use service method which has history tracking
                 self.service.auto_crop_current()
                 self.show_current_image()
+                # Clear button state after operation completes
+                if not self.batch_process.get():
+                    self.clear_button_depressed()
                 # Advance to next image if batch processing is enabled
                 if self.batch_process.get():
                     # Check if we're not at the last image before navigating
@@ -2011,12 +2152,26 @@ class PearlEditApp(BaseTk):
                         # Navigate to next image and continue processing
                         self.after(100, lambda: self.navigate_images(1))
                         self.after(200, self.auto_crop_current)
+                    else:
+                        # Last image processed, clear button state
+                        self.clear_button_depressed()
             except UserFacingError as e:
                 messagebox.showerror("Error", str(e))
+                # Clear button state on error
+                self.clear_button_depressed()
             except Exception as e:
                 messagebox.showerror("Error", f"Error during auto-crop: {str(e)}")
+                # Clear button state on error
+                self.clear_button_depressed()
         
-        ThresholdAdjuster(self, image_path, self.service, apply_crop)
+        dialog = ThresholdAdjuster(self, image_path, self.service, apply_crop)
+        # Handle dialog close (cancel) - clear button state if dialog is closed without applying
+        original_destroy = dialog.destroy
+        def on_dialog_close():
+            if not apply_called['value'] and self.active_tool_button == self.autocrop_button:
+                self.clear_button_depressed()
+            original_destroy()
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
     
     def auto_crop_all(self):
         """Auto-crop all images with threshold adjustment."""
@@ -2177,10 +2332,9 @@ class PearlEditApp(BaseTk):
         
         image_path = current.current_image_path
         
-        def apply_split(line_coords, threshold):
+        def apply_split(line_coords, sensitivity):
             try:
-                # Update settings
-                self.service.settings.seam_threshold = threshold
+                # Settings are already updated by SeamFinderDialog (both ROI threshold and sensitivity)
                 # Use service method which has history tracking
                 self.service.split_current('angled', line_coords=line_coords)
                 self.show_current_image()
@@ -2236,7 +2390,7 @@ class PearlEditApp(BaseTk):
         
         def process_all():
             import cv2
-            from ..image_ops import detect_gutter_line
+            from ..image_ops import detect_gutter_line_dark_path, detect_gutter_line_profile, detect_gutter_line
             
             try:
                 processed_count = 0
@@ -2257,14 +2411,38 @@ class PearlEditApp(BaseTk):
                         skipped_count += 1
                         continue
                     
-                    # Detect seam with current settings
+                    # Detect seam with current settings using dark-path method
                     settings = self.service.settings
-                    line_coords, confidence = detect_gutter_line(
+                    roi_threshold = getattr(settings, 'seam_roi_threshold', 170)
+                    
+                    line_coords, confidence = detect_gutter_line_dark_path(
                         image,
-                        settings.seam_threshold,
+                        roi_threshold,
+                        settings.seam_threshold,  # Used as sensitivity
                         settings.seam_angle_max_deg,
                         settings.seam_min_length_ratio
                     )
+                    
+                    # Fallback to profile method if dark-path fails or confidence is very low
+                    if not line_coords or confidence < 0.1:
+                        logger.debug(f"Dark-path method failed, trying profile method for {image_path.name}")
+                        line_coords, confidence = detect_gutter_line_profile(
+                            image,
+                            roi_threshold,
+                            settings.seam_threshold,
+                            settings.seam_angle_max_deg,
+                            settings.seam_min_length_ratio
+                        )
+                        
+                        # Fallback to original Hough method if profile method also fails
+                        if not line_coords or confidence < 0.1:
+                            logger.debug(f"Profile method also failed, trying Hough fallback for {image_path.name}")
+                            line_coords, confidence = detect_gutter_line(
+                                image,
+                                settings.seam_threshold,
+                                settings.seam_angle_max_deg,
+                                settings.seam_min_length_ratio
+                            )
                     
                     # If confidence is high enough, apply automatically
                     if line_coords and confidence >= settings.seam_confidence_min:
@@ -2288,31 +2466,75 @@ class PearlEditApp(BaseTk):
                         record = self.service.state.images[idx]
                         image_path = record.current_image_path
                         
-                        # Show dialog for this image
-                        dialog_result = {'action': 'skip'}  # Default to skip
+                        # Show dialog for this image - schedule on main thread
+                        dialog_result = {'action': 'skip', 'done': False}  # Default to skip
                         
-                        def apply_split(line_coords, threshold):
+                        def make_callbacks(idx, img_path, result_dict):
+                            """Create callbacks for this specific dialog."""
+                            def apply_split(line_coords, sensitivity):
+                                try:
+                                    # Settings are already updated by SeamFinderDialog (both ROI threshold and sensitivity)
+                                    self.service.split_current('angled', line_coords=line_coords)
+                                    result_dict['action'] = 'applied'
+                                    result_dict['done'] = True
+                                    # Schedule image update on main thread
+                                    self.after_idle(self.show_current_image)
+                                except UserFacingError as e:
+                                    self.after_idle(lambda err=e: messagebox.showerror("Error", str(err)))
+                                except Exception as e:
+                                    logger.error(f"Error applying split: {e}")
+                                    result_dict['done'] = True
+                            
+                            def skip_split():
+                                result_dict['action'] = 'skip'
+                                result_dict['done'] = True
+                            
+                            return apply_split, skip_split
+                        
+                        apply_cb, skip_cb = make_callbacks(idx, image_path, dialog_result)
+                        
+                        # Create dialog on main thread
+                        dialog = None
+                        try:
+                            dialog = SeamFinderDialog(self, image_path, self.service, apply_cb, skip_cb)
+                            # Wait for dialog to close - but handle TclError if window is destroyed
                             try:
-                                self.service.settings.seam_threshold = threshold
-                                self.service.split_current('angled', line_coords=line_coords)
-                                dialog_result['action'] = 'applied'
-                                self.show_current_image()
-                            except UserFacingError as e:
-                                messagebox.showerror("Error", str(e))
-                        
-                        def skip_split():
+                                self.wait_window(dialog)
+                            except tk.TclError as e:
+                                # Window was destroyed before we could wait for it
+                                logger.warning(f"Dialog window was destroyed unexpectedly: {e}")
+                                if not dialog_result['done']:
+                                    dialog_result['action'] = 'skip'
+                                    dialog_result['done'] = True
+                        except tk.TclError as e:
+                            # Window path is invalid - dialog was already destroyed or never created properly
+                            logger.warning(f"Dialog window path error for {image_path.name}: {e}")
+                            if not dialog_result['done']:
+                                dialog_result['action'] = 'skip'
+                                dialog_result['done'] = True
+                        except Exception as e:
+                            logger.error(f"Error creating dialog for {image_path.name}: {e}")
                             dialog_result['action'] = 'skip'
-                        
-                        # Create and wait for dialog
-                        dialog = SeamFinderDialog(self, image_path, self.service, apply_split, skip_split)
-                        self.wait_window(dialog)
+                            dialog_result['done'] = True
+                        finally:
+                            # Ensure dialog is properly cleaned up
+                            if dialog:
+                                try:
+                                    # Check if window exists before trying to destroy it
+                                    try:
+                                        if hasattr(dialog, 'winfo_exists') and dialog.winfo_exists():
+                                            dialog.destroy()
+                                    except tk.TclError:
+                                        pass  # Window already destroyed or invalid path
+                                except (tk.TclError, AttributeError):
+                                    pass  # Window already destroyed or invalid
                         
                         if dialog_result['action'] == 'applied':
                             processed_count += 1
                         else:
                             skipped_count += 1
                         
-                        self.show_current_image()
+                        self.after_idle(self.show_current_image)
                 
                 # Show completion message
                 message = f"Auto-splitting completed!\n\nProcessed: {processed_count}\nSkipped: {skipped_count}"
@@ -2337,7 +2559,12 @@ class PearlEditApp(BaseTk):
             if not self.show_all_images_warning("Crop"):
                 return
         
-        self.clear_all_modes()
+        # Set button to depressed if not already set (e.g., when called from keyboard shortcut)
+        if self.active_tool_button != self.crop_button:
+            self.set_button_depressed(self.crop_button, self.crop_on_icon)
+        
+        # Clear modes but preserve button state for crop tool
+        self._clear_modes_preserve_button()
         self.cropping = True
         self.image_canvas.config(cursor="crosshair")
         self.image_canvas.bind("<ButtonPress-1>", self.start_crop)
@@ -2465,7 +2692,8 @@ class PearlEditApp(BaseTk):
             if not self.show_all_images_warning("Straighten"):
                 return
         
-        self.clear_all_modes()
+        # Clear modes but preserve button state for straighten tool
+        self._clear_modes_preserve_button()
         self.straightening_mode = True
         self.straighten_start = None
         
@@ -2535,6 +2763,7 @@ class PearlEditApp(BaseTk):
                 self.straighten_start = None
                 self.guide_line = None
                 self.image_canvas.config(cursor="")
+                self.clear_button_depressed()
             else:
                 if self.guide_line:
                     self.image_canvas.delete(self.guide_line)

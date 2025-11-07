@@ -166,7 +166,7 @@ class ThresholdAdjuster(tk.Toplevel):
                     # Get minimum area rectangle to show the dominant edge
                     rect = cv2.minAreaRect(largest_contour)
                     box = cv2.boxPoints(rect)
-                    box = np.int0(box)
+                    box = box.astype(np.int32)
                     
                     # Draw the rotated rectangle (blue) to indicate the dominant edge
                     cv2.drawContours(preview, [box], 0, (255, 0, 0), 2)

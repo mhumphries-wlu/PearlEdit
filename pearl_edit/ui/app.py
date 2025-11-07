@@ -483,19 +483,18 @@ class PearlEditApp(BaseTk):
         )
         self.split_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # Autosplit button hidden per user request
-        # def autosplit_finder_wrapper():
-        #     self.clear_button_depressed()
-        #     self.update_status_display("Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line")
-        #     self.auto_split_current_finder()
-        # self.autosplit_finder_button = self.create_button_with_hint(
-        #     split_buttons,
-        #     self.split_icon,  # Reuse split icon for now
-        #     autosplit_finder_wrapper,
-        #     "Auto Split (Finder)\nAutomatically detect book seam\nAdjust threshold in dialog\nClick Apply Split to split",
-        #     "Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line"
-        # )
-        # self.autosplit_finder_button.pack(side=tk.LEFT, padx=5, pady=2)
+        def autosplit_finder_wrapper():
+            self.clear_button_depressed()
+            self.update_status_display("Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line")
+            self.auto_split_current_finder()
+        self.autosplit_finder_button = self.create_button_with_hint(
+            split_buttons,
+            self.split_icon,  # Reuse split icon for now
+            autosplit_finder_wrapper,
+            "Auto Split (Finder)\nAutomatically detect book seam\nAdjust threshold in dialog\nClick Apply Split to split",
+            "Auto Split Finder: Adjust threshold slider to find the book seam | Click Apply Split to split along detected line"
+        )
+        self.autosplit_finder_button.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Label for Split
         split_label = tk.Label(
@@ -2378,7 +2377,8 @@ class PearlEditApp(BaseTk):
             try:
                 # Settings are already updated by SeamFinderDialog (both ROI threshold and sensitivity)
                 # Use service method which has history tracking
-                self.service.split_current('angled', line_coords=line_coords)
+                # Apply 1% inner margin for auto-split
+                self.service.split_current('angled', line_coords=line_coords, inner_margin_ratio=0.01)
                 self.show_current_image()
                 # Advance to next image if batch processing is enabled
                 if self.batch_process.get():
@@ -2400,13 +2400,401 @@ class PearlEditApp(BaseTk):
         
         SeamFinderDialog(self, image_path, self.service, apply_split, skip_split)
     
-    def auto_split_all_finder(self):
-        """Auto-split all images with seam finder, prompting on low confidence."""
-        current = self.service.get_current_image()
-        if not current:
+    def auto_split_selection_dialog(self):
+        """Open dialog to select images for auto-split with filmstrip interface."""
+        if not self.service.state.images:
+            messagebox.showwarning("No Images", "No images to split.")
             return
         
-        image_path = current.current_image_path
+        # Filter out already-split images
+        unsplit_images = [(i, record) for i, record in enumerate(self.service.state.images) 
+                         if record.left_or_right is None]
+        
+        if not unsplit_images:
+            messagebox.showinfo("No Images", "All images have already been split.")
+            return
+        
+        # Create dialog window
+        dialog = tk.Toplevel(self)
+        dialog.title("Auto Split Images")
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # Variables
+        selected_indices = set()
+        
+        # Thumbnail size - smaller for filmstrip
+        thumb_width = 100
+        thumb_height = 120
+        thumb_padding = 3
+        
+        # Main container with tighter padding
+        main_frame = tk.Frame(dialog, bg='#f0f0f0')
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Filmstrip section
+        filmstrip_container = tk.LabelFrame(main_frame, text="Image Selection", relief=tk.GROOVE, bg='#f0f0f0')
+        filmstrip_container.pack(fill=tk.X, pady=(0, 10))
+        
+        # Canvas for thumbnails with proper height
+        filmstrip_canvas = tk.Canvas(
+            filmstrip_container, 
+            bg="white", 
+            highlightthickness=1, 
+            highlightbackground="#cccccc",
+            height=thumb_height + 30
+        )
+        filmstrip_canvas.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(5, 0))
+        
+        # Horizontal scrollbar positioned below canvas
+        scrollbar = ttk.Scrollbar(filmstrip_container, orient=tk.HORIZONTAL, command=filmstrip_canvas.xview)
+        scrollbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 5))
+        filmstrip_canvas.configure(xscrollcommand=scrollbar.set)
+        
+        # Inner frame for thumbnails
+        thumbnails_frame = tk.Frame(filmstrip_canvas, bg="white")
+        filmstrip_canvas_window = filmstrip_canvas.create_window((0, 0), window=thumbnails_frame, anchor=tk.NW)
+        
+        def configure_scroll_region(event=None):
+            filmstrip_canvas.update_idletasks()
+            dialog.update_idletasks()
+            
+            thumbnails_width = thumbnails_frame.winfo_reqwidth()
+            thumbnails_height = thumbnails_frame.winfo_reqheight()
+            
+            if thumbnails_width <= 1 and len(thumbnail_widgets) > 0:
+                last_container = thumbnails_frame.winfo_children()[-1] if thumbnails_frame.winfo_children() else None
+                if last_container:
+                    thumbnails_width = last_container.winfo_x() + last_container.winfo_reqwidth() + thumb_padding
+            
+            canvas_width = filmstrip_canvas.winfo_width()
+            canvas_height = filmstrip_canvas.winfo_height()
+            
+            if thumbnails_width <= 1:
+                thumbnails_width = len(thumbnail_widgets) * (thumb_width + thumb_padding * 2 + 10)
+            
+            scroll_width = max(thumbnails_width, canvas_width, 1)
+            scroll_height = max(thumbnails_height, canvas_height, 1)
+            
+            filmstrip_canvas.configure(scrollregion=(0, 0, scroll_width, scroll_height))
+            
+            if thumbnails_width > 1:
+                filmstrip_canvas.itemconfig(filmstrip_canvas_window, width=thumbnails_width)
+            
+            filmstrip_canvas.update_idletasks()
+        
+        def on_canvas_configure(event):
+            configure_scroll_region()
+        
+        thumbnails_frame.bind('<Configure>', configure_scroll_region)
+        filmstrip_canvas.bind('<Configure>', on_canvas_configure)
+        
+        # Add mouse wheel support for scrolling
+        def on_mousewheel(event):
+            if event.delta:
+                filmstrip_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+            else:
+                if event.num == 4:
+                    filmstrip_canvas.xview_scroll(-1, "units")
+                elif event.num == 5:
+                    filmstrip_canvas.xview_scroll(1, "units")
+        
+        filmstrip_canvas.bind("<MouseWheel>", on_mousewheel)
+        filmstrip_canvas.bind("<Button-4>", on_mousewheel)
+        filmstrip_canvas.bind("<Button-5>", on_mousewheel)
+        
+        # Store thumbnail references
+        thumbnail_widgets = []
+        thumbnail_photos = []
+        
+        # Create count label early so it can be referenced
+        count_label = None  # Will be created later, but declare here for scope
+        
+        def update_count_label():
+            """Update the count label."""
+            nonlocal count_label
+            if count_label:
+                count = len(selected_indices)
+                count_label.config(text=f"{count} image(s) selected for splitting")
+        
+        def update_selection_display():
+            """Update visual selection display."""
+            for i, (orig_idx, record) in enumerate(unsplit_images):
+                if orig_idx in selected_indices:
+                    thumbnail_widgets[i].config(bg="#4a90e2", relief=tk.SUNKEN, borderwidth=3)
+                    for child in thumbnail_widgets[i].winfo_children():
+                        if isinstance(child, tk.Label) and hasattr(child, 'cget'):
+                            try:
+                                if child.cget('text').startswith('Page'):
+                                    child.config(fg="white", bg="#4a90e2")
+                            except:
+                                pass
+                    thumbnail_widgets[i].selected = True
+                else:
+                    thumbnail_widgets[i].config(bg="white", relief=tk.RAISED, borderwidth=1)
+                    for child in thumbnail_widgets[i].winfo_children():
+                        if isinstance(child, tk.Label) and hasattr(child, 'cget'):
+                            try:
+                                if child.cget('text').startswith('Page'):
+                                    child.config(fg="black", bg="white")
+                            except:
+                                pass
+                    thumbnail_widgets[i].selected = False
+            update_count_label()
+        
+        def load_thumbnails():
+            """Load all thumbnails for unsplit images."""
+            nonlocal thumbnail_widgets, thumbnail_photos
+            
+            # Clear existing
+            for widget in thumbnail_widgets:
+                widget.destroy()
+            thumbnail_widgets.clear()
+            thumbnail_photos.clear()
+            
+            # Load thumbnails with proper spacing
+            for i, (orig_idx, record) in enumerate(unsplit_images):
+                # Container frame for each thumbnail
+                container = tk.Frame(thumbnails_frame, bg="white", padx=2, pady=5)
+                container.grid(row=0, column=i, padx=thumb_padding, sticky=tk.N)
+                
+                # Thumbnail frame with border
+                frame = tk.Frame(container, relief=tk.RAISED, borderwidth=1, bg="white")
+                frame.pack()
+                
+                # Load and resize image
+                try:
+                    image_path = record.current_image_path
+                    if not image_path.exists():
+                        raise FileNotFoundError(f"Image not found: {image_path}")
+                    
+                    with Image.open(image_path) as img:
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        max_thumb_width = thumb_width
+                        max_thumb_height = thumb_height - 25
+                        
+                        img_ratio = img.width / img.height
+                        if img_ratio > max_thumb_width / max_thumb_height:
+                            new_width = max_thumb_width
+                            new_height = int(max_thumb_width / img_ratio)
+                        else:
+                            new_height = max_thumb_height
+                            new_width = int(max_thumb_height * img_ratio)
+                        
+                        img_thumb = img.resize((new_width, new_height), Image.LANCZOS)
+                        
+                        padded_thumb = Image.new('RGB', (max_thumb_width, max_thumb_height), 'white')
+                        x_offset = (max_thumb_width - new_width) // 2
+                        y_offset = (max_thumb_height - new_height) // 2
+                        padded_thumb.paste(img_thumb, (x_offset, y_offset))
+                        
+                        photo = ImageTk.PhotoImage(padded_thumb)
+                        thumbnail_photos.append(photo)
+                        
+                        label = tk.Label(frame, image=photo, bg="white", borderwidth=0)
+                        label.image = photo
+                        label.pack(pady=2)
+                        
+                        page_label = tk.Label(
+                            frame, 
+                            text=f"Page {orig_idx+1}", 
+                            bg="white", 
+                            font=("Arial", 8, "bold"),
+                            pady=2
+                        )
+                        page_label.pack()
+                        
+                        frame.image_index = orig_idx
+                        frame.selected = False
+                        thumbnail_widgets.append(frame)
+                        
+                        # Bind click events
+                        def make_click_handler(idx):
+                            def handler(event):
+                                if event.state & 0x0004:  # CTRL
+                                    if idx in selected_indices:
+                                        selected_indices.discard(idx)
+                                    else:
+                                        selected_indices.add(idx)
+                                elif event.state & 0x0001:  # SHIFT
+                                    if selected_indices:
+                                        start_idx = min(selected_indices)
+                                        end_idx = max(selected_indices)
+                                        if idx < start_idx:
+                                            selected_indices.update(range(idx, start_idx + 1))
+                                        elif idx > end_idx:
+                                            selected_indices.update(range(end_idx, idx + 1))
+                                    else:
+                                        selected_indices.add(idx)
+                                else:
+                                    selected_indices.clear()
+                                    selected_indices.add(idx)
+                                update_selection_display()
+                            return handler
+                        
+                        frame.bind("<Button-1>", make_click_handler(orig_idx))
+                        label.bind("<Button-1>", make_click_handler(orig_idx))
+                        page_label.bind("<Button-1>", make_click_handler(orig_idx))
+                        container.bind("<Button-1>", make_click_handler(orig_idx))
+                        
+                except Exception as e:
+                    logger.error(f"Error loading thumbnail {orig_idx}: {e}")
+                    placeholder = tk.Label(
+                        frame, 
+                        text=f"Page {orig_idx+1}\n\n⚠\nError", 
+                        bg="#e0e0e0", 
+                        width=thumb_width//10, 
+                        height=thumb_height//20,
+                        font=("Arial", 9)
+                    )
+                    placeholder.pack(fill=tk.BOTH, expand=True)
+                    frame.image_index = orig_idx
+                    frame.selected = False
+                    thumbnail_widgets.append(frame)
+        
+        # Selection info label
+        info_frame = tk.Frame(main_frame, bg='#f0f0f0')
+        info_frame.pack(fill=tk.X, pady=(5, 5))
+        
+        selection_label = tk.Label(
+            info_frame,
+            text="Tip: Use Ctrl+Click to toggle selection, Shift+Click to select range",
+            bg='#f0f0f0',
+            font=("Arial", 9),
+            fg="#666666"
+        )
+        selection_label.pack(side=tk.LEFT)
+        
+        # Buttons frame
+        button_frame = tk.Frame(main_frame, bg='#f0f0f0')
+        button_frame.pack(fill=tk.X, pady=(10, 5))
+        
+        # Create count label before initial load
+        count_label = tk.Label(
+            button_frame,
+            text="0 image(s) selected for splitting",
+            bg='#f0f0f0',
+            font=("Arial", 9),
+            fg="#333333"
+        )
+        count_label.pack(side=tk.LEFT)
+        
+        # Initial load
+        load_thumbnails()
+        update_selection_display()
+        
+        dialog.update_idletasks()
+        dialog.update()
+        
+        def delayed_scroll_update():
+            configure_scroll_region()
+            dialog.after(50, configure_scroll_region)
+        
+        dialog.after(100, delayed_scroll_update)
+        
+        def split_all():
+            """Split all unsplit images."""
+            indices = [orig_idx for orig_idx, _ in unsplit_images]
+            if not indices:
+                messagebox.showwarning("No Images", "No images to split.", parent=dialog)
+                return
+            
+            dialog.destroy()
+            self._perform_auto_split(indices)
+        
+        def split_selected():
+            """Split selected images."""
+            if not selected_indices:
+                messagebox.showwarning("No Selection", "No images selected for splitting.", parent=dialog)
+                return
+            
+            indices = list(selected_indices)
+            dialog.destroy()
+            self._perform_auto_split(indices)
+        
+        def cancel():
+            dialog.destroy()
+        
+        # Buttons
+        split_all_btn = tk.Button(
+            button_frame, 
+            text="Split All", 
+            command=split_all,
+            bg="#5cb85c",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            cursor="hand2"
+        )
+        split_all_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        split_selected_btn = tk.Button(
+            button_frame, 
+            text="Split Selected", 
+            command=split_selected,
+            bg="#5cb85c",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            cursor="hand2"
+        )
+        split_selected_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        cancel_btn = tk.Button(
+            button_frame,
+            text="Cancel",
+            command=cancel,
+            bg="#6c757d",
+            fg="white",
+            font=("Arial", 10),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            cursor="hand2"
+        )
+        cancel_btn.pack(side=tk.RIGHT)
+        
+        # Set initial size and position - ensure buttons are visible
+        # Wait for all content to load first
+        dialog.update_idletasks()
+        dialog.update()
+        
+        # Calculate required height after all content is loaded
+        required_height = (
+            filmstrip_container.winfo_reqheight() +
+            info_frame.winfo_reqheight() +
+            button_frame.winfo_reqheight() +
+            60  # padding for margins
+        )
+        
+        # Ensure minimum height
+        final_height = max(520, required_height)
+        
+        # Set geometry
+        dialog.geometry(f"900x{final_height}")
+        dialog.update_idletasks()
+        
+        # Center dialog
+        x = (dialog.winfo_screenwidth() // 2) - 450
+        y = (dialog.winfo_screenheight() // 2) - (final_height // 2)
+        dialog.geometry(f"900x{final_height}+{x}+{y}")
+        
+        # Make dialog resizable
+        dialog.resizable(True, True)
+        
+        # Set minimum size to ensure buttons are always visible
+        dialog.minsize(700, 520)
+    
+    def _perform_auto_split(self, indices):
+        """Perform auto-split on the specified image indices."""
+        if not indices:
+            return
         
         # Show initial progress window
         progress_window = tk.Toplevel(self)
@@ -2420,7 +2808,7 @@ class PearlEditApp(BaseTk):
         progress_bar = ttk.Progressbar(progress_window, length=200, mode='determinate')
         progress_bar.pack(pady=20)
         
-        total = len(self.service.state.images)
+        total = len(indices)
         progress_bar['maximum'] = total
         
         def update_progress(current_num, total_num, message):
@@ -2432,19 +2820,42 @@ class PearlEditApp(BaseTk):
         
         def process_all():
             import cv2
-            from ..image_ops import detect_seam_by_page_border
+            from ..image_ops import detect_vertical_trench_near_center_parallel
             
             try:
                 processed_count = 0
                 skipped_count = 0
-                low_confidence_indices = []
                 
-                # First pass: detect and auto-apply where confident
-                for i, record in enumerate(self.service.state.images):
-                    self.service.state.current_image_index = i
+                # Track images by original_image path (stable identifier) instead of indices
+                # This avoids index invalidation when splits insert new records
+                target_originals = {}
+                for i in indices:
+                    if i < len(self.service.state.images):
+                        record = self.service.state.images[i]
+                        if record.left_or_right is None:  # Only track unsplit images
+                            target_originals[record.original_image] = record.current_image_path
+                
+                # Process each target image by finding its current unsplit record
+                for idx_num, (original_path, initial_image_path) in enumerate(target_originals.items()):
+                    # Re-find the current unsplit record for this original image
+                    # (indices may have shifted due to previous splits)
+                    current_idx = None
+                    for j, rec in enumerate(self.service.state.images):
+                        if rec.original_image == original_path and rec.left_or_right is None:
+                            current_idx = j
+                            break
+                    
+                    if current_idx is None:
+                        # Image was already split or removed
+                        logger.info(f"Skipping already-split image: {initial_image_path.name}")
+                        skipped_count += 1
+                        continue
+                    
+                    self.service.state.current_image_index = current_idx
+                    record = self.service.state.images[current_idx]
                     image_path = record.current_image_path
                     
-                    update_progress(i + 1, total, f"Processing image {i + 1} of {total}")
+                    update_progress(idx_num + 1, len(target_originals), f"Processing image {idx_num + 1} of {len(target_originals)}")
                     
                     # Load image
                     image = cv2.imread(str(image_path))
@@ -2453,124 +2864,78 @@ class PearlEditApp(BaseTk):
                         skipped_count += 1
                         continue
                     
-                    # Detect seam with current settings using page border method
+                    # Detect seam: try multiple ROI thresholds to find best for this specific image
                     settings = self.service.settings
-                    roi_threshold = getattr(settings, 'seam_roi_threshold', 170)
-                    margin = getattr(settings, 'seam_margin', 20)
+                    base_threshold = getattr(settings, 'seam_roi_threshold', 170)
                     
-                    line_coords, confidence = detect_seam_by_page_border(
-                        image,
-                        roi_threshold,
-                        margin
-                    )
+                    # Try a range of thresholds around the base to find best for this image
+                    threshold_candidates = [
+                        base_threshold - 20,
+                        base_threshold - 10,
+                        base_threshold,
+                        base_threshold + 10,
+                        base_threshold + 20
+                    ]
+                    threshold_candidates = [max(0, min(255, t)) for t in threshold_candidates]
+                    threshold_candidates = sorted(set(threshold_candidates))
                     
-                    # If confidence is high enough, apply automatically
-                    if line_coords and confidence >= settings.seam_confidence_min:
+                    best_line_coords = None
+                    best_confidence = -1.0
+                    best_threshold = base_threshold
+                    
+                    # Evaluate each threshold and keep the best result
+                    for test_threshold in threshold_candidates:
+                        line_coords, confidence = detect_vertical_trench_near_center_parallel(
+                            image,
+                            test_threshold,
+                            center_band_ratio=0.05,
+                            num_workers=20
+                        )
+                        
+                        if line_coords and confidence > best_confidence:
+                            best_line_coords = line_coords
+                            best_confidence = confidence
+                            best_threshold = test_threshold
+                    
+                    # Use the best result found
+                    line_coords = best_line_coords
+                    confidence = best_confidence
+                    
+                    # Apply automatically if any line was detected (use highest confidence found)
+                    if line_coords:
                         try:
-                            self.service.split_current('angled', line_coords=line_coords)
+                            # Pass inner_margin_ratio to trim 1% from inner edges of both pages
+                            self.service.split_current('angled', line_coords=line_coords, inner_margin_ratio=0.01)
                             processed_count += 1
+                            logger.info(f"Auto-split image ({image_path.name}) with confidence {confidence:.2f} using threshold {best_threshold}")
                         except UserFacingError as e:
-                            logger.error(f"Error splitting image {i + 1}: {e}")
+                            logger.error(f"Error splitting image: {e}")
                             skipped_count += 1
                     else:
-                        # Low confidence - mark for manual review
-                        low_confidence_indices.append(i)
+                        # No line detected - skip this image
+                        logger.warning(f"No seam detected for image: {image_path.name}")
+                        skipped_count += 1
                 
                 # Close progress window
                 progress_window.destroy()
                 
-                # Second pass: prompt for low-confidence images
-                if low_confidence_indices:
-                    for idx in low_confidence_indices:
-                        self.service.state.current_image_index = idx
-                        record = self.service.state.images[idx]
-                        image_path = record.current_image_path
-                        
-                        # Show dialog for this image - schedule on main thread
-                        dialog_result = {'action': 'skip', 'done': False}  # Default to skip
-                        
-                        def make_callbacks(idx, img_path, result_dict):
-                            """Create callbacks for this specific dialog."""
-                            def apply_split(line_coords, sensitivity):
-                                try:
-                                    # Settings are already updated by SeamFinderDialog (both ROI threshold and sensitivity)
-                                    self.service.split_current('angled', line_coords=line_coords)
-                                    result_dict['action'] = 'applied'
-                                    result_dict['done'] = True
-                                    # Schedule image update on main thread
-                                    self.after_idle(self.show_current_image)
-                                except UserFacingError as e:
-                                    self.after_idle(lambda err=e: messagebox.showerror("Error", str(err)))
-                                except Exception as e:
-                                    logger.error(f"Error applying split: {e}")
-                                    result_dict['done'] = True
-                            
-                            def skip_split():
-                                result_dict['action'] = 'skip'
-                                result_dict['done'] = True
-                            
-                            return apply_split, skip_split
-                        
-                        apply_cb, skip_cb = make_callbacks(idx, image_path, dialog_result)
-                        
-                        # Create dialog on main thread
-                        dialog = None
-                        try:
-                            dialog = SeamFinderDialog(self, image_path, self.service, apply_cb, skip_cb)
-                            # Wait for dialog to close - but handle TclError if window is destroyed
-                            try:
-                                self.wait_window(dialog)
-                            except tk.TclError as e:
-                                # Window was destroyed before we could wait for it
-                                logger.warning(f"Dialog window was destroyed unexpectedly: {e}")
-                                if not dialog_result['done']:
-                                    dialog_result['action'] = 'skip'
-                                    dialog_result['done'] = True
-                        except tk.TclError as e:
-                            # Window path is invalid - dialog was already destroyed or never created properly
-                            logger.warning(f"Dialog window path error for {image_path.name}: {e}")
-                            if not dialog_result['done']:
-                                dialog_result['action'] = 'skip'
-                                dialog_result['done'] = True
-                        except Exception as e:
-                            logger.error(f"Error creating dialog for {image_path.name}: {e}")
-                            dialog_result['action'] = 'skip'
-                            dialog_result['done'] = True
-                        finally:
-                            # Ensure dialog is properly cleaned up
-                            if dialog:
-                                try:
-                                    # Check if window exists before trying to destroy it
-                                    try:
-                                        if hasattr(dialog, 'winfo_exists') and dialog.winfo_exists():
-                                            dialog.destroy()
-                                    except tk.TclError:
-                                        pass  # Window already destroyed or invalid path
-                                except (tk.TclError, AttributeError):
-                                    pass  # Window already destroyed or invalid
-                        
-                        if dialog_result['action'] == 'applied':
-                            processed_count += 1
-                        else:
-                            skipped_count += 1
-                        
-                        self.after_idle(self.show_current_image)
-                
                 # Show completion message
                 message = f"Auto-splitting completed!\n\nProcessed: {processed_count}\nSkipped: {skipped_count}"
-                if low_confidence_indices:
-                    message += f"\n\nReviewed: {len(low_confidence_indices)} low-confidence images"
-                
                 messagebox.showinfo("Auto-split Complete", message)
                 self.show_current_image()
                 
             except Exception as e:
-                logger.error(f"Error in auto_split_all_finder: {e}")
+                logger.error(f"Error in auto_split: {e}")
                 messagebox.showerror("Error", f"An error occurred during auto-split: {str(e)}")
                 progress_window.destroy()
         
         import threading
         threading.Thread(target=process_all, daemon=True).start()
+    
+    def auto_split_all_finder(self):
+        """Auto-split all images automatically using highest confidence line, no preview."""
+        # Open selection dialog instead of direct processing
+        self.auto_split_selection_dialog()
     
     def activate_crop_tool(self, event=None):
         """Activate crop tool."""

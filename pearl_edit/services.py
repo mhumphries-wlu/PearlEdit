@@ -342,7 +342,8 @@ class ImageService:
         orientation: str,
         split_coord: Optional[int] = None,
         line_coords: Optional[Tuple[int, int, int, int]] = None,
-        angle: Optional[float] = None
+        angle: Optional[float] = None,
+        inner_margin_ratio: Optional[float] = None
     ) -> bool:
         """
         Split current image. Can split original images or already-split images (re-splitting).
@@ -352,6 +353,7 @@ class ImageService:
             split_coord: X or Y coordinate for straight splits
             line_coords: Line coordinates for angled splits
             angle: Angle for angled splits
+            inner_margin_ratio: Optional ratio (0.0-1.0) to trim from inner edges of both split images
             
         Returns:
             True if successful
@@ -389,14 +391,15 @@ class ImageService:
                 width, height = image.size
                 
                 # Perform split based on orientation
+                base_orient = None  # Will be set based on orientation
                 if orientation == 'vertical':
                     if split_coord is None:
                         raise UserFacingError("Split coordinate required for vertical split")
-                    left_img, right_img = split_image_vertical(image, split_coord)
+                    base_orient = 'vertical'
                 elif orientation == 'horizontal':
                     if split_coord is None:
                         raise UserFacingError("Split coordinate required for horizontal split")
-                    left_img, right_img = split_image_horizontal(image, split_coord)
+                    base_orient = 'horizontal'
                 elif orientation == 'angled':
                     if line_coords is None:
                         raise UserFacingError("Line coordinates required for angled split")
@@ -406,9 +409,57 @@ class ImageService:
                     dy = abs(y2 - y1)
                     # If line is more horizontal than vertical, use horizontal orientation
                     base_orient = 'horizontal' if dy < dx else 'vertical'
-                    left_img, right_img = split_image_angled(image, line_coords, base_orient)
                 else:
                     raise UserFacingError(f"Invalid orientation: {orientation}")
+                
+                # Apply inner margin by splitting with adjusted lines
+                if inner_margin_ratio and inner_margin_ratio > 0.0:
+                    margin = max(1, int((width if base_orient == 'vertical' else height) * inner_margin_ratio))
+                    
+                    if orientation == 'vertical':
+                        # For left image: shift split line left (increase x) so left image extends further right, leaving margin
+                        left_split_coord = min(width - 1, split_coord + margin)
+                        left_img, _ = split_image_vertical(image, left_split_coord)
+                        
+                        # For right image: shift split line right (decrease x) so right image extends further left, leaving margin
+                        right_split_coord = max(1, split_coord - margin)
+                        _, right_img = split_image_vertical(image, right_split_coord)
+                        
+                    elif orientation == 'horizontal':
+                        # For top image: shift split line up (increase y) so top image extends further down, leaving margin
+                        top_split_coord = min(height - 1, split_coord + margin)
+                        left_img, _ = split_image_horizontal(image, top_split_coord)
+                        
+                        # For bottom image: shift split line down (decrease y) so bottom image extends further up, leaving margin
+                        bottom_split_coord = max(1, split_coord - margin)
+                        _, right_img = split_image_horizontal(image, bottom_split_coord)
+                        
+                    else:  # angled
+                        x1, y1, x2, y2 = line_coords
+                        if base_orient == 'vertical':
+                            # For left image: shift line left (increase x) so it extends further right
+                            left_line_coords = (min(width - 1, x1 + margin), y1, min(width - 1, x2 + margin), y2)
+                            left_img, _ = split_image_angled(image, left_line_coords, base_orient)
+                            
+                            # For right image: shift line right (decrease x) so it extends further left
+                            right_line_coords = (max(0, x1 - margin), y1, max(0, x2 - margin), y2)
+                            _, right_img = split_image_angled(image, right_line_coords, base_orient)
+                        else:  # horizontal
+                            # For top image: shift line up (increase y) so it extends further down
+                            top_line_coords = (x1, min(height - 1, y1 + margin), x2, min(height - 1, y2 + margin))
+                            left_img, _ = split_image_angled(image, top_line_coords, base_orient)
+                            
+                            # For bottom image: shift line down (decrease y) so it extends further up
+                            bottom_line_coords = (x1, max(0, y1 - margin), x2, max(0, y2 - margin))
+                            _, right_img = split_image_angled(image, bottom_line_coords, base_orient)
+                else:
+                    # No margin: perform normal split
+                    if orientation == 'vertical':
+                        left_img, right_img = split_image_vertical(image, split_coord)
+                    elif orientation == 'horizontal':
+                        left_img, right_img = split_image_horizontal(image, split_coord)
+                    else:  # angled
+                        left_img, right_img = split_image_angled(image, line_coords, base_orient)
                 
                 # Generate filenames using the current image path as base
                 # This works for both original and split images

@@ -9,7 +9,8 @@ from typing import Optional, Tuple, Callable
 import logging
 
 from ..image_ops import (
-    detect_seam_by_page_border,
+    detect_vertical_trench_near_center,
+    detect_vertical_trench_near_center_parallel,
     compute_largest_white_roi,
     ImageProcessingError
 )
@@ -45,7 +46,6 @@ class SeamFinderDialog(tk.Toplevel):
         # Get ROI threshold from settings (with backward compatibility)
         roi_threshold = getattr(settings, 'seam_roi_threshold', 170)
         self.roi_threshold_var = tk.IntVar(value=roi_threshold)
-        self.margin_var = tk.IntVar(value=getattr(settings, 'seam_margin', 20))
         
         # Load the image
         self.original_image = cv2.imread(str(image_path))
@@ -108,41 +108,29 @@ class SeamFinderDialog(tk.Toplevel):
         )
         roi_threshold_scale.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
         
-        # Split Margin control
-        ttk.Label(main_frame, text="Split Margin:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        margin_scale = ttk.Scale(
-            main_frame,
-            from_=0,
-            to=100,
-            orient=tk.HORIZONTAL,
-            variable=self.margin_var,
-            command=lambda _: self.update_preview()
-        )
-        margin_scale.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
-        
         # Confidence label
         self.confidence_label = ttk.Label(
             main_frame,
             text="Confidence: --",
             font=("Arial", 9)
         )
-        self.confidence_label.grid(row=3, column=0, columnspan=2, pady=5)
+        self.confidence_label.grid(row=2, column=0, columnspan=2, pady=5)
         
         # Info label
         info_label = ttk.Label(
             main_frame,
             text="Adjust ROI Threshold to find the largest white mass (document area).\n"
-                 "Adjust Split Margin to shift the split line away from the page edge.\n"
+                 "The detection finds the vertical trench near the image center.\n"
                  "Low confidence pages will prompt for review during batch processing.",
             font=("Arial", 8),
             foreground="gray",
             justify=tk.LEFT
         )
-        info_label.grid(row=4, column=0, columnspan=2, pady=5)
+        info_label.grid(row=3, column=0, columnspan=2, pady=5)
         
         # Buttons frame
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=5, column=0, columnspan=2, pady=10)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=10)
         
         ttk.Button(button_frame, text="Apply Split", command=self.apply_split).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Skip", command=self.skip).pack(side=tk.LEFT, padx=5)
@@ -162,7 +150,6 @@ class SeamFinderDialog(tk.Toplevel):
             preview = cv2.cvtColor(self.original_image.copy(), cv2.COLOR_BGR2RGB)
 
             roi_threshold = self.roi_threshold_var.get()
-            margin = self.margin_var.get()
 
             # Compute ROI for overlay
             gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
@@ -170,11 +157,11 @@ class SeamFinderDialog(tk.Toplevel):
             roi_rect = (roi_x, roi_y, roi_w, roi_h)
             self.current_roi = roi_rect
 
-            # Detect seam using page border method
-            line_coords, confidence = detect_seam_by_page_border(
+            # Detect seam using vertical trench detection near center
+            line_coords, confidence = detect_vertical_trench_near_center(
                 self.original_image,
                 roi_threshold,
-                margin
+                center_band_ratio=0.05
             )
             
             self.current_line_coords = line_coords
@@ -206,13 +193,8 @@ class SeamFinderDialog(tk.Toplevel):
         # Draw detected line on preview
         if line_coords:
             x1, y1, x2, y2 = line_coords
-            # Color based on confidence: green (high), orange (medium), red (low)
-            if confidence >= 0.55:
-                line_color = (0, 255, 0)  # Green
-            elif confidence >= 0.3:
-                line_color = (255, 165, 0)  # Orange
-            else:
-                line_color = (255, 0, 0)  # Red
+            # Always red per requirement
+            line_color = (255, 0, 0)  # Red
             
             # Draw line
             cv2.line(preview, (x1, y1), (x2, y2), line_color, 3)
@@ -275,22 +257,30 @@ class SeamFinderDialog(tk.Toplevel):
                 )
             except tk.TclError:
                 pass  # Window was destroyed
-            logger.warning(f"No seam detected for {self.image_path.name} at ROI threshold {self.roi_threshold_var.get()}, margin {self.margin_var.get()}")
+            logger.warning(f"No seam detected for {self.image_path.name} at ROI threshold {self.roi_threshold_var.get()}")
             return
         
         roi_threshold = self.roi_threshold_var.get()
-        margin = self.margin_var.get()
         
         try:
             # Update settings
             self.service.settings.seam_roi_threshold = roi_threshold
-            self.service.settings.seam_margin = margin
             
-            logger.info(f"Applying split for {self.image_path.name} with ROI threshold {roi_threshold}, margin {margin}, confidence {self.current_confidence:.2f}")
+            # Recompute using parallel detector for highest-confidence final line
+            best_coords, best_conf = detect_vertical_trench_near_center_parallel(
+                self.original_image,
+                roi_threshold,
+                center_band_ratio=0.05,
+                num_workers=20
+            )
+            final_coords = best_coords if best_coords else self.current_line_coords
+            final_conf = best_conf if best_coords else self.current_confidence
+            
+            logger.info(f"Applying split for {self.image_path.name} with ROI threshold {roi_threshold}, confidence {final_conf:.2f}")
             
             # Call callback if provided
             if self.on_apply:
-                self.on_apply(self.current_line_coords, margin)
+                self.on_apply(final_coords, 0)  # margin no longer used, pass 0 for compatibility
             
             # Close the window
             try:

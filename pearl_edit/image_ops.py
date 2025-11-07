@@ -5,6 +5,7 @@ from PIL import Image, ImageDraw, ImageChops
 from typing import Tuple, Optional
 import logging
 import math
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -1207,6 +1208,322 @@ def detect_seam_by_page_border(
         return None, 0.0
 
 
+def detect_vertical_trench_near_center(
+    image: np.ndarray,
+    roi_threshold: int,
+    center_band_ratio: float = 0.10,
+    scale_width: int = 1200
+) -> Tuple[Optional[Tuple[int, int, int, int]], float]:
+    """
+    Detect a near-vertical gutter ('trench') within ±center_band_ratio of image center.
+    Returns a single vertical seam line and a confidence score in [0, 1].
+
+    Improved pipeline:
+    - Robust ROI via compute_document_crop_rect (fallback to largest white ROI)
+    - Binary whitening + black-hat with vertical kernel to enhance dark trench
+    - Vertical close to connect breaks; light horizontal open to suppress text bridges
+    - Column-wise score in central band ∩ ROI using fused maps
+    - Refine seam by per-row local maxima near best column; confidence uses
+      prominence, center proximity, and continuity of per-row detections
+    """
+    try:
+        if image is None or image.size == 0:
+            return None, 0.0
+
+        h0, w0 = image.shape[:2]
+
+        # Downscale to bounded working size
+        if w0 > scale_width:
+            scale = scale_width / float(w0)
+            work_w = int(round(w0 * scale))
+            work_h = int(round(h0 * scale))
+            work_img = cv2.resize(image, (work_w, work_h), interpolation=cv2.INTER_AREA)
+        else:
+            scale = 1.0
+            work_img = image
+            work_h, work_w = h0, w0
+
+        # Grayscale + optional CLAHE
+        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+        except Exception:
+            pass
+
+        # Whitening with Otsu fallback
+        _, binary = cv2.threshold(gray, roi_threshold, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(binary) < 0.02 * binary.size:
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # ROI detection (prefer robust crop rect; fallback to largest white ROI)
+        roi = compute_document_crop_rect(gray, threshold=roi_threshold, margin=8)
+        if roi is None:
+            rx, ry, rw, rh = compute_largest_white_roi(gray, roi_threshold, margin=8)
+        else:
+            rx, ry, rw, rh = roi
+        rx = max(0, min(rx, work_w - 1))
+        ry = max(0, min(ry, work_h - 1))
+        rw = max(1, min(rw, work_w - rx))
+        rh = max(1, min(rh, work_h - ry))
+
+        # Central band limits
+        cx = work_w * 0.5
+        band_half = int(round(work_w * center_band_ratio))
+        band_x1 = max(0, int(cx - band_half))
+        band_x2 = min(work_w, int(cx + band_half))
+        if band_x2 - band_x1 < 3:
+            return None, 0.0
+
+        # Enhance dark trench: black-hat with vertical kernel + dark mask
+        short_side = min(work_h, work_w)
+        k_vert = max(7, int(round(work_h * 0.02)))
+        if k_vert % 2 == 0:
+            k_vert += 1
+        vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_vert))
+        # Black-hat highlights dark lines on bright background
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, vert_kernel)
+        blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
+
+        dark = (binary == 0).astype(np.uint8) * 255
+        # Connect breaks; suppress horizontal noise
+        dark_connected = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, vert_kernel, iterations=1)
+        k_h = max(5, int(round(work_w * 0.01)))
+        horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_h, 1))
+        dark_clean = cv2.morphologyEx(dark_connected, cv2.MORPH_OPEN, horiz_kernel, iterations=1)
+
+        # Fuse maps: emphasize consistent vertical darkness
+        dark_clean_f = dark_clean.astype(np.float32) / 255.0
+        blackhat_f = blackhat.astype(np.float32) / 255.0
+        fused = 0.6 * dark_clean_f + 0.4 * blackhat_f
+
+        # Score columns within ROI ∩ central band
+        x1 = max(rx, band_x1)
+        x2 = min(rx + rw, band_x2)
+        y1 = ry
+        y2 = ry + rh
+        if x2 - x1 < 3 or y2 - y1 < 3:
+            return None, 0.0
+        band = fused[y1:y2, x1:x2]
+
+        profile = band.sum(axis=0)
+        # Smooth the 1D profile
+        k = max(5, int(round((x2 - x1) * 0.02)))
+        if k % 2 == 0:
+            k += 1
+        smooth = cv2.GaussianBlur(profile.reshape(1, -1), (1, k), 0, borderType=cv2.BORDER_REPLICATE).ravel()
+
+        idx = int(np.argmax(smooth))
+        if idx <= 0 or idx >= smooth.size - 1:
+            return None, 0.0
+
+        # Refine by per-row local maxima near the best column
+        col_abs = x1 + idx
+        window = max(3, int(round((x2 - x1) * 0.02)))
+        x_lo = max(x1, col_abs - window)
+        x_hi = min(x2, col_abs + window)
+        row_xs = []
+        band_rows = fused[y1:y2, x_lo:x_hi]
+        if band_rows.size > 0:
+            # Argmax per row
+            local_idx = np.argmax(band_rows, axis=1)
+            row_xs = (x_lo + local_idx).astype(np.int32)
+        
+        if len(row_xs) > 0:
+            # Use median x for robustness
+            refined_x = int(np.median(row_xs))
+        else:
+            refined_x = col_abs
+
+        # Confidence: peak prominence, center proximity, and continuity
+        left_max = float(np.max(smooth[:max(1, idx - k)])) if idx > 0 else 0.0
+        right_max = float(np.max(smooth[min(idx + k, smooth.size - 1):])) if idx < smooth.size - 1 else 0.0
+        neighbors = max(left_max, right_max, 1e-6)
+        peak = float(smooth[idx])
+        prominence = max(0.0, (peak - neighbors) / (neighbors + 1e-6))
+        center_bias = 1.0 - (abs((x1 + idx) - cx) / max(1.0, (band_x2 - band_x1)))
+        if len(row_xs) > 0:
+            continuity = float(np.count_nonzero(band_rows.max(axis=1) > 0.25)) / float(band_rows.shape[0])
+            jitter = float(np.std(row_xs)) / max(1.0, (x2 - x1))
+            continuity_score = max(0.0, min(1.0, 0.8 * continuity + 0.2 * (1.0 - jitter * 4.0)))
+        else:
+            continuity_score = 0.0
+
+        confidence = (
+            0.55 * min(1.0, prominence) +
+            0.25 * max(0.0, center_bias) +
+            0.20 * continuity_score
+        )
+        confidence = max(0.0, min(1.0, confidence))
+
+        # Map to original coordinates
+        split_x = refined_x
+        if scale != 1.0:
+            split_x = int(round(split_x / scale))
+        x = int(split_x)
+        return (x, 0, x, h0 - 1), float(confidence)
+
+    except Exception as e:
+        logger.error(f"Error in vertical-trench detection: {e}")
+        return None, 0.0
+
+
+def detect_vertical_trench_near_center_parallel(
+    image: np.ndarray,
+    roi_threshold: int,
+    center_band_ratio: float = 0.10,
+    scale_width: int = 1200,
+    num_workers: int = 20
+) -> Tuple[Optional[Tuple[int, int, int, int]], float]:
+    """
+    Parallel variant that evaluates candidate columns within the center band using
+    multiple workers and returns the line with the highest confidence.
+
+    This function shares the same preprocessing as detect_vertical_trench_near_center,
+    then scores many candidate columns in parallel using per-row continuity metrics.
+    """
+    try:
+        if image is None or image.size == 0:
+            return None, 0.0
+
+        h0, w0 = image.shape[:2]
+
+        # Downscale to bounded working size
+        if w0 > scale_width:
+            scale = scale_width / float(w0)
+            work_w = int(round(w0 * scale))
+            work_h = int(round(h0 * scale))
+            work_img = cv2.resize(image, (work_w, work_h), interpolation=cv2.INTER_AREA)
+        else:
+            scale = 1.0
+            work_img = image
+            work_h, work_w = h0, w0
+
+        # Grayscale + optional CLAHE
+        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+        except Exception:
+            pass
+
+        # Whitening with Otsu fallback
+        _, binary = cv2.threshold(gray, roi_threshold, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(binary) < 0.02 * binary.size:
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # ROI detection (prefer robust crop rect; fallback to largest white ROI)
+        roi = compute_document_crop_rect(gray, threshold=roi_threshold, margin=8)
+        if roi is None:
+            rx, ry, rw, rh = compute_largest_white_roi(gray, roi_threshold, margin=8)
+        else:
+            rx, ry, rw, rh = roi
+        rx = max(0, min(rx, work_w - 1))
+        ry = max(0, min(ry, work_h - 1))
+        rw = max(1, min(rw, work_w - rx))
+        rh = max(1, min(rh, work_h - ry))
+
+        # Central band limits
+        cx = work_w * 0.5
+        band_half = int(round(work_w * center_band_ratio))
+        band_x1 = max(0, int(cx - band_half))
+        band_x2 = min(work_w, int(cx + band_half))
+        if band_x2 - band_x1 < 3:
+            return None, 0.0
+
+        # Enhance dark trench: black-hat with vertical kernel + dark mask
+        k_vert = max(7, int(round(work_h * 0.02)))
+        if k_vert % 2 == 0:
+            k_vert += 1
+        vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_vert))
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, vert_kernel)
+        blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
+
+        dark = (binary == 0).astype(np.uint8) * 255
+        dark_connected = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, vert_kernel, iterations=1)
+        k_h = max(5, int(round(work_w * 0.01)))
+        horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_h, 1))
+        dark_clean = cv2.morphologyEx(dark_connected, cv2.MORPH_OPEN, horiz_kernel, iterations=1)
+
+        # Fuse maps
+        dark_clean_f = dark_clean.astype(np.float32) / 255.0
+        blackhat_f = blackhat.astype(np.float32) / 255.0
+        fused = 0.6 * dark_clean_f + 0.4 * blackhat_f
+
+        # Candidate band (ROI ∩ center band)
+        x1 = max(rx, band_x1)
+        x2 = min(rx + rw, band_x2)
+        y1 = ry
+        y2 = ry + rh
+        if x2 - x1 < 3 or y2 - y1 < 3:
+            return None, 0.0
+        band = fused[y1:y2, x1:x2]
+
+        # Base profile and smoothing for peak strength
+        profile = band.sum(axis=0)
+        k = max(5, int(round((x2 - x1) * 0.02)))
+        if k % 2 == 0:
+            k += 1
+        smooth = cv2.GaussianBlur(profile.reshape(1, -1), (1, k), 0, borderType=cv2.BORDER_REPLICATE).ravel()
+        smooth_max = float(np.max(smooth)) if smooth.size else 1.0
+        if smooth_max <= 0.0:
+            return None, 0.0
+
+        # Evaluate all candidates (each column) in parallel
+        band_width = x2 - x1
+        window = max(3, int(round(band_width * 0.02)))
+
+        def score_at_idx(idx: int) -> Tuple[float, int, Optional[np.ndarray]]:
+            # Peak normalization
+            peak_norm = float(smooth[idx]) / smooth_max
+            # Center bias
+            center_bias = 1.0 - (abs((x1 + idx) - cx) / max(1.0, (band_x2 - band_x1)))
+            # Per-row continuity around this column
+            col_abs = x1 + idx
+            x_lo = max(x1, col_abs - window)
+            x_hi = min(x2, col_abs + window)
+            rows = fused[y1:y2, x_lo:x_hi]
+            if rows.size == 0:
+                return 0.0, col_abs, None
+            local_idx = np.argmax(rows, axis=1)
+            row_xs = (x_lo + local_idx).astype(np.int32)
+            row_max = rows.max(axis=1)
+            continuity = float(np.count_nonzero(row_max > 0.25)) / float(rows.shape[0])
+            jitter = float(np.std(row_xs)) / max(1.0, band_width)
+            continuity_score = max(0.0, min(1.0, 0.8 * continuity + 0.2 * (1.0 - jitter * 4.0)))
+            # Combine
+            conf = 0.5 * peak_norm + 0.25 * max(0.0, center_bias) + 0.25 * continuity_score
+            return conf, col_abs, row_xs
+
+        best_conf = -1.0
+        best_x = None
+        best_rows = None
+        indices = list(range(band_width))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, int(num_workers))) as ex:
+            for conf, col_abs, row_xs in ex.map(score_at_idx, indices):
+                if conf > best_conf:
+                    best_conf = conf
+                    best_x = col_abs
+                    best_rows = row_xs
+
+        if best_x is None or best_conf <= 0.0:
+            return None, 0.0
+
+        # Refine X using median of per-row maxima if available
+        if isinstance(best_rows, np.ndarray) and best_rows.size > 0:
+            refined_x = int(np.median(best_rows))
+        else:
+            refined_x = int(best_x)
+
+        split_x = refined_x
+        if scale != 1.0:
+            split_x = int(round(split_x / scale))
+        x = int(split_x)
+        return (x, 0, x, h0 - 1), float(max(0.0, min(1.0, best_conf)))
+
+    except Exception as e:
+        logger.error(f"Error in parallel vertical-trench detection: {e}")
+        return None, 0.0
 def compute_document_crop_rect(
     gray: np.ndarray,
     threshold: int,
